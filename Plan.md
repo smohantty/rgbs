@@ -198,6 +198,12 @@ Reason:
 - the compatibility target is artifact parity, not helper-program parity
 - removing it simplifies control flow and enables better caching and instrumentation
 
+Buildroot materialization exception:
+
+- even though `rgbs` should not depend on the `depanneur` binary, buildroot population should follow the old GBS / `depanneur` semantics rather than a custom unpacker
+- prefer a real RPM transaction path for buildroot installation, with the current archive-extraction path treated only as a temporary fallback
+- revisit modernization of this layer only after the v1 pipeline is stable and parity is demonstrated
+
 ### 2. Keep `rpmbuild` authoritative
 
 Do not reimplement RPM package build semantics in Rust.

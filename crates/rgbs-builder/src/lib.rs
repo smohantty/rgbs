@@ -924,14 +924,133 @@ fn install_packages_into_buildroot(root: &Path, packages: &[DownloadedPackage]) 
         ),
     );
 
+    let existing_packages = query_installed_nevras(root)?;
+    if let Some(backend) = select_buildroot_install_backend()? {
+        log_debug_line(format!(
+            "using buildroot install backend {} for {}",
+            backend.label(),
+            root.display()
+        ));
+        match install_packages_via_rpm_transaction(root, packages, backend) {
+            Ok(()) => return Ok(()),
+            Err(err) => {
+                if !existing_packages.is_empty() {
+                    return Err(RgbsError::message(format!(
+                        "compat buildroot backend {} failed for {} and cannot safely fall back on a reused root: {}",
+                        backend.label(),
+                        root.display(),
+                        err
+                    )));
+                }
+                print_warning(format!(
+                    "compat buildroot backend {} failed, falling back to staged extractor: {}",
+                    backend.label(),
+                    err
+                ));
+                log_debug_line(format!(
+                    "compat buildroot backend {} failed for {}: {}",
+                    backend.label(),
+                    root.display(),
+                    err
+                ));
+                reset_buildroot_for_extractor_fallback(root)?;
+            }
+        }
+    }
+
+    install_packages_via_staged_extractor(root, packages)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BuildrootInstallBackend {
+    RpmCompat,
+}
+
+impl BuildrootInstallBackend {
+    fn label(self) -> &'static str {
+        match self {
+            Self::RpmCompat => "rpm-compat",
+        }
+    }
+}
+
+fn select_buildroot_install_backend() -> Result<Option<BuildrootInstallBackend>> {
+    if command_in_path("fakeroot") {
+        return Ok(Some(BuildrootInstallBackend::RpmCompat));
+    }
+    if running_as_root()? {
+        return Ok(Some(BuildrootInstallBackend::RpmCompat));
+    }
+    Ok(None)
+}
+
+fn install_packages_via_rpm_transaction(
+    root: &Path,
+    packages: &[DownloadedPackage],
+    backend: BuildrootInstallBackend,
+) -> Result<()> {
+    match backend {
+        BuildrootInstallBackend::RpmCompat => {
+            install_packages_with_compat_rpm_transaction(root, packages)
+        }
+    }
+}
+
+fn install_packages_with_compat_rpm_transaction(
+    root: &Path,
+    packages: &[DownloadedPackage],
+) -> Result<()> {
+    let use_fakeroot = command_in_path("fakeroot");
+    let mut install = if use_fakeroot {
+        let mut command = Command::new("fakeroot");
+        command.arg("--").arg("rpm");
+        command
+    } else {
+        Command::new("rpm")
+    };
+    install
+        .arg("--root")
+        .arg(root)
+        .arg("--dbpath")
+        .arg("/var/lib/rpm")
+        .arg("-Uvh")
+        .arg("--nodeps")
+        .arg("--nosignature")
+        .arg("--notriggers")
+        .arg("--noscripts")
+        .arg("--ignorearch");
+    for package in packages {
+        install.arg(&package.path);
+    }
+    run_command(&mut install).map(|_| ()).map_err(|err| {
+        RgbsError::message(format!(
+            "failed to install {} packages through the compat rpm transaction backend for {}: {}",
+            packages.len(),
+            root.display(),
+            err
+        ))
+    })
+}
+
+fn reset_buildroot_for_extractor_fallback(root: &Path) -> Result<()> {
+    if root.exists() {
+        fs::remove_dir_all(root).map_err(|err| RgbsError::io(root, err))?;
+    }
+    initialize_buildroot(root)
+}
+
+fn install_packages_via_staged_extractor(
+    root: &Path,
+    packages: &[DownloadedPackage],
+) -> Result<()> {
     if !command_in_path("rpm2archive") {
         return Err(RgbsError::message(
-            "buildroot package install requires `rpm2archive`; run `rgbs doctor` and `rgbs fix` on Ubuntu to install it",
+            "buildroot package install fallback requires `rpm2archive`; run `rgbs doctor` and `rgbs fix` on Ubuntu to install it",
         ));
     }
     if !command_in_path("tar") {
         return Err(RgbsError::message(
-            "buildroot package install requires `tar`; run `rgbs doctor` and `rgbs fix` on Ubuntu to install it",
+            "buildroot package install fallback requires `tar`; run `rgbs doctor` and `rgbs fix` on Ubuntu to install it",
         ));
     }
 
@@ -940,7 +1059,7 @@ fn install_packages_into_buildroot(root: &Path, packages: &[DownloadedPackage]) 
     for package in packages {
         extract_package_payload(root, package).map_err(|err| {
             RgbsError::message(format!(
-                "buildroot package install failed for {} while extracting {} ({}): {}",
+                "buildroot package install fallback failed for {} while extracting {} ({}): {}",
                 root.display(),
                 package.nevra,
                 package.path,
@@ -949,6 +1068,27 @@ fn install_packages_into_buildroot(root: &Path, packages: &[DownloadedPackage]) 
         })?;
     }
     Ok(())
+}
+
+fn running_as_root() -> Result<bool> {
+    if matches!(env::var("EUID").as_deref(), Ok("0"))
+        || matches!(env::var("UID").as_deref(), Ok("0"))
+    {
+        return Ok(true);
+    }
+
+    let output = Command::new("id")
+        .arg("-u")
+        .output()
+        .map_err(|err| RgbsError::command("id -u", err.to_string()))?;
+    if !output.status.success() {
+        return Err(RgbsError::command(
+            "id -u",
+            format!("exit status {}", output.status),
+        ));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).trim() == "0")
 }
 
 fn register_packages_in_rpmdb(root: &Path, packages: &[DownloadedPackage]) -> Result<()> {

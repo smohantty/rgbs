@@ -369,19 +369,30 @@ fn collect_doctor_report(target_arch: Option<&str>) -> DoctorReport {
         true,
         InstallClass::RuntimeRequired,
         &["rpm"],
-        "required for rpmdb initialization and package metadata registration",
+        "required for buildroot rpm transactions and rpmdb access",
         "install the RPM tooling package that provides `rpm`",
     );
     push_command_check(
         &mut checks,
-        "Required for `rgbs build`",
+        "Recommended extras",
+        "fakeroot",
+        &["fakeroot"],
+        false,
+        InstallClass::Recommended,
+        &["fakeroot"],
+        "enables the old GBS-style compat buildroot backend instead of the archive-extraction fallback",
+        "install `fakeroot` to use the compat buildroot transaction backend",
+    );
+    push_command_check(
+        &mut checks,
+        "Recommended extras",
         "rpm2archive",
         &["rpm2archive"],
-        true,
-        InstallClass::RuntimeRequired,
+        false,
+        InstallClass::Recommended,
         &["rpm"],
-        "required for converting RPM payloads into tar archives before buildroot extraction",
-        "install the RPM tooling package that provides `rpm2archive`",
+        "keeps the staged archive extractor available as a fallback buildroot backend",
+        "install the RPM tooling package that provides `rpm2archive` if you want the fallback extractor available",
     );
     push_command_check(
         &mut checks,
