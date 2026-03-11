@@ -63,6 +63,13 @@ V1 should support fast repeated builds on the same build root. Exact incremental
 
 The required compatibility target is the resulting build behavior and artifacts, not the old helper processes.
 
+Old GBS implementation should be used as a behavioral reference only:
+
+- use it to confirm feature coverage, flag semantics, artifact layout, and accepted edge-case behavior
+- do not treat its process structure, helper boundaries, temporary path layout, or caching model as design guidance
+- prefer simpler and more modern architecture whenever compatibility does not require the old behavior
+- assume old GBS contains historical baggage and avoid carrying that baggage forward unless it is required for compatibility
+
 Must preserve:
 
 - repo precedence from `.gbs.conf`
@@ -350,6 +357,8 @@ Tasks:
 Required behavior:
 
 - cache directory stays under the build root or global cache in a deterministic layout
+- prefer cache placement on the same filesystem as active build roots when possible
+- retain HTTP validators so unchanged remote artifacts can be revalidated cheaply
 - download failures retry conservatively and fail clearly
 
 ### Stage 6: Create or reuse chroot
@@ -367,6 +376,12 @@ Tasks:
 - install required RPMs
 - preserve root for subsequent builds on exact fingerprint match
 - invalidate root when relevant inputs change
+
+Preferred materialization strategy:
+
+- treat reused roots as immutable snapshots
+- materialize the working root from a cached snapshot via reflink/clone when the filesystem supports it
+- fall back to normal copy/install when cheap cloning is unavailable
 
 ### Stage 7: Run `rpmbuild`
 
@@ -466,11 +481,58 @@ Primary speed wins in v1 should come from:
 
 - parallel repo metadata fetch
 - persistent metadata cache keyed by repo identity and checksum
+- persistent parsed-metadata cache so warm runs do not need to reparse rpm-md XML
 - persistent dependency-solver cache keyed by exact build inputs
 - exact-match buildroot reuse
+- same-filesystem cache and root placement to enable cheap root materialization
 - bounded parallel RPM downloads
 
 Do not trade correctness for speed. Reuse remains exact-match only.
+
+## Borrow From `uv` Architecture
+
+`uv` has a few performance patterns worth copying directly, even though `rgbs` is working in the
+RPM/chroot world instead of Python wheels:
+
+### 1. Versioned cache buckets plus atomic writes
+
+- split cache storage into versioned buckets for raw repo metadata, parsed metadata, solver state, downloaded RPMs, source staging, and root snapshots
+- write cache entries through temporary files and atomic rename
+- keep normal cache operation append-only and reserve destructive cleanup for explicit cache-prune flows
+
+### 2. Cache normalized metadata, not only raw downloads
+
+- store raw `repomd.xml`, primary metadata, and `build.conf` by URL plus checksum
+- also persist a normalized binary representation that is fast to reload into the dependency solver
+- treat metadata parsing as a hot-path optimization target, because warm builds should avoid repeating decompression and XML parsing work
+
+### 3. Use explicit cache invalidation and refresh knobs
+
+- keep exact fingerprints as the default reuse boundary
+- add targeted refresh controls for repo metadata, solver state, source staging, and buildroot snapshots instead of forcing full cold rebuilds
+- make source-staging fingerprints cheap by preferring git object identity and scoped dirty-file state over whole-tree walks when possible
+
+### 4. Separate concurrency domains
+
+- use independent limits for repo metadata fetch, RPM downloads, and root materialization
+- avoid one global "parallelism" knob because the best values differ for network, disk, and chroot setup work
+- apply conservative exponential backoff for transient network failures
+
+### 5. Remember remote capability failures
+
+- cache per-repo facts such as supported compression, successful validators, and whether a transport optimization is unsupported
+- once an optimization fails for a repo, stop retrying it on every run until the repo fingerprint changes
+
+### 6. Reuse immutable artifacts, not mutable worktrees
+
+- keep cached artifacts and cached root snapshots immutable
+- create mutable working roots from those immutable snapshots
+- this preserves correctness while still allowing cheap warm-start paths
+
+What does not transfer cleanly from `uv`:
+
+- `uv`'s PubGrub-specific resolver heuristics are much less relevant because `rgbs` should stay on `libsolv`
+- wheel-specific tricks such as range-reading zip metadata map only partially to RPM, where repo metadata is already the primary dependency source
 
 ## Implementation Phases
 
