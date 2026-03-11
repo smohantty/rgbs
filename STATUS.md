@@ -24,10 +24,12 @@ Compatibility target:
   - `rgbs-builder`
 - `.gbs.conf` parsing with:
   - project, home, and system config layering
+  - explicit `-c` / `--config` override layering
   - profile-style and legacy `[build]` config support
   - auth inheritance and `passwdx` decoding
   - variable interpolation for supported forms
 - `rgbs build` CLI flag support for:
+  - `-c` / `--config`
   - `-A` / `--arch`
   - `-P` / `--profile`
   - `-R` / `--repository`

@@ -16,6 +16,8 @@ use rgbs_config::{BuildRequest, LoadOptions, load};
 #[command(name = "rgbs")]
 #[command(about = "Rust GBS prototype", version)]
 struct Cli {
+    #[arg(short = 'c', long = "config", global = true)]
+    config: Option<PathBuf>,
     #[command(subcommand)]
     command: Commands,
 }
@@ -162,7 +164,7 @@ fn run() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Build(args) => run_build(args)?,
+        Commands::Build(args) => run_build(cli.config, args)?,
         Commands::Doctor(args) => run_doctor(args)?,
         Commands::Fix(args) => run_fix(args)?,
     }
@@ -170,11 +172,13 @@ fn run() -> Result<()> {
     Ok(())
 }
 
-fn run_build(args: BuildArgs) -> Result<()> {
-    let options = LoadOptions::discover(None)?;
+fn run_build(config: Option<PathBuf>, args: BuildArgs) -> Result<()> {
+    let mut options = LoadOptions::discover(config)?;
+    let git_dir = resolve_build_git_dir(&options.cwd, args.gitdir)?;
+    options.cwd = git_dir.clone();
     let config = load(&options)?;
     let plan = config.resolve_build_plan(&BuildRequest {
-        git_dir: args.gitdir.unwrap_or(options.cwd),
+        git_dir,
         arch: args.arch,
         profile: args.profile,
         repositories: args.repositories,
@@ -196,6 +200,14 @@ fn run_build(args: BuildArgs) -> Result<()> {
 
     println!("{}", serde_json::to_string_pretty(&outcome).unwrap());
     Ok(())
+}
+
+fn resolve_build_git_dir(cwd: &Path, gitdir: Option<PathBuf>) -> Result<PathBuf> {
+    match gitdir {
+        Some(path) if path.is_absolute() => Ok(path),
+        Some(path) => Ok(cwd.join(path)),
+        None => Ok(cwd.to_path_buf()),
+    }
 }
 
 fn run_doctor(args: DoctorArgs) -> Result<()> {
@@ -930,10 +942,12 @@ fn running_as_root() -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::{
-        DoctorCheck, DoctorReport, DoctorStatus, FixPlan, InstallClass,
+        Cli, DoctorCheck, DoctorReport, DoctorStatus, FixPlan, InstallClass,
         cross_compiler_apt_packages, cross_compiler_candidates, parse_os_release_text,
-        parse_target_arch_arg, same_arch,
+        parse_target_arch_arg, resolve_build_git_dir, same_arch,
     };
+    use clap::Parser;
+    use std::path::{Path, PathBuf};
 
     #[test]
     fn cross_compiler_candidates_cover_supported_arches() {
@@ -955,6 +969,48 @@ mod tests {
         assert_eq!(parse_target_arch_arg("arm64").unwrap(), "aarch64");
         assert_eq!(parse_target_arch_arg("armhf").unwrap(), "armv7l");
         assert!(parse_target_arch_arg("x86_64").is_err());
+    }
+
+    #[test]
+    fn cli_accepts_global_config_before_subcommand() {
+        let cli = Cli::try_parse_from([
+            "rgbs",
+            "-c",
+            "/tmp/custom.gbs.conf",
+            "build",
+            "-A",
+            "aarch64",
+        ])
+        .unwrap();
+        assert_eq!(cli.config, Some(PathBuf::from("/tmp/custom.gbs.conf")));
+    }
+
+    #[test]
+    fn cli_accepts_global_config_after_subcommand() {
+        let cli = Cli::try_parse_from([
+            "rgbs",
+            "build",
+            "-A",
+            "armv7l",
+            "--config",
+            "/tmp/custom.gbs.conf",
+        ])
+        .unwrap();
+        assert_eq!(cli.config, Some(PathBuf::from("/tmp/custom.gbs.conf")));
+    }
+
+    #[test]
+    fn resolve_build_git_dir_defaults_to_current_directory() {
+        let cwd = Path::new("/tmp/work");
+        let resolved = resolve_build_git_dir(cwd, None).unwrap();
+        assert_eq!(resolved, PathBuf::from("/tmp/work"));
+    }
+
+    #[test]
+    fn resolve_build_git_dir_makes_relative_paths_absolute_from_cwd() {
+        let cwd = Path::new("/tmp/work");
+        let resolved = resolve_build_git_dir(cwd, Some(PathBuf::from("pkg"))).unwrap();
+        assert_eq!(resolved, PathBuf::from("/tmp/work/pkg"));
     }
 
     #[test]

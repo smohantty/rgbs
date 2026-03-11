@@ -55,6 +55,7 @@ Run the CLI without installing:
 cargo run -p rgbs-cli -- build --help
 cargo run -p rgbs-cli -- doctor
 cargo run -p rgbs-cli -- fix --dry-run
+cargo run -p rgbs-cli -- -c path/to/custom.gbs.conf build -A aarch64
 ```
 
 ## Install
@@ -71,6 +72,7 @@ After install, the command is:
 rgbs build --help
 rgbs doctor
 rgbs fix --dry-run
+rgbs -c path/to/custom.gbs.conf build -A aarch64
 ```
 
 ## Usage
@@ -90,6 +92,7 @@ rgbs doctor -A aarch64
 rgbs fix --dry-run
 rgbs fix --dry-run -A armv7l
 rgbs fix --dry-run --with-source-build -A aarch64
+rgbs -c path/to/custom.gbs.conf build -A aarch64
 rgbs build -A armv7l
 rgbs build -A aarch64
 rgbs build -A aarch64 path/to/package
@@ -103,6 +106,7 @@ rgbs build -A aarch64 --perf
 
 Supported flags on the current CLI:
 
+- `-c`, `--config`
 - `-A`, `--arch`
 - `-P`, `--profile`
 - `-R`, `--repository`
@@ -138,6 +142,38 @@ Supported target architectures:
 7. stage sources and spec
 8. run `rpmbuild`
 9. collect RPM/SRPM artifacts into the output repo layout
+
+## Spec Selection
+
+By default, `rgbs` looks for spec files under the resolved `packaging_dir` from `.gbs.conf`. The default packaging dir is `packaging`.
+
+Current selection order is:
+
+- `--spec <FILE>`, if provided
+- `<gitdir>/<packaging_dir>/<repo-name>.spec`, if it exists
+- the first `.spec` file in the packaging dir after lexical sort
+
+If no spec file exists under the packaging dir, the build fails.
+
+## Config Loading
+
+`rgbs build` supports an explicit config file with `-c` / `--config`.
+
+Example:
+
+```bash
+rgbs -c ~/gbs-my.conf build -A aarch64
+```
+
+Current config precedence is:
+
+- explicit `-c` / `--config` file, when provided
+- repo-root `.gbs.conf`
+- current directory `.gbs.conf`
+- `~/.gbs.conf`
+- `/etc/gbs.conf`
+
+`-c` adds a highest-priority config layer; it does not disable the normal hierarchy underneath it.
 
 ## Doctor
 
