@@ -922,14 +922,14 @@ fn install_packages_into_buildroot(root: &Path, packages: &[DownloadedPackage]) 
         ),
     );
 
-    if !command_in_path("rpm2cpio") {
+    if !command_in_path("rpm2archive") {
         return Err(RgbsError::message(
-            "buildroot package install requires `rpm2cpio`; run `rgbs doctor` and `rgbs fix` on Ubuntu to install it",
+            "buildroot package install requires `rpm2archive`; run `rgbs doctor` and `rgbs fix` on Ubuntu to install it",
         ));
     }
-    if !command_in_path("cpio") {
+    if !command_in_path("tar") {
         return Err(RgbsError::message(
-            "buildroot package install requires `cpio`; run `rgbs doctor` and `rgbs fix` on Ubuntu to install it",
+            "buildroot package install requires `tar`; run `rgbs doctor` and `rgbs fix` on Ubuntu to install it",
         ));
     }
 
@@ -981,99 +981,118 @@ fn extract_package_payload(root: &Path, package: &DownloadedPackage) -> Result<(
         package.nevra, package.path
     ));
 
-    let mut rpm2cpio = Command::new("rpm2cpio");
-    rpm2cpio
+    let extract_root = root.join(".rgbs-extract");
+    ensure_dir(&extract_root)?;
+    let package_extract_dir =
+        extract_root.join(sha256_hex(format!("{}\0{}", package.nevra, package.path)));
+    if package_extract_dir.exists() {
+        fs::remove_dir_all(&package_extract_dir)
+            .map_err(|err| RgbsError::io(&package_extract_dir, err))?;
+    }
+    ensure_dir(&package_extract_dir)?;
+    log_debug_line(format!(
+        "staging rpm archive conversion in {}",
+        package_extract_dir.display()
+    ));
+
+    let mut rpm2archive = Command::new("rpm2archive");
+    rpm2archive
+        .current_dir(&package_extract_dir)
         .arg(&package.path)
-        .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let rendered_rpm2cpio = render_command(&rpm2cpio);
-    log_debug_line(format!("run: {rendered_rpm2cpio}"));
-    let mut rpm2cpio_child = rpm2cpio
-        .spawn()
-        .map_err(|err| RgbsError::command(&rendered_rpm2cpio, err.to_string()))?;
-    let rpm2cpio_stdout = rpm2cpio_child.stdout.take().ok_or_else(|| {
+    run_command(&mut rpm2archive).map(|_| ()).map_err(|err| {
         RgbsError::message(format!(
-            "failed to capture stdout for payload extraction command: {rendered_rpm2cpio}"
+            "failed to convert {} into a tar archive in {}: {}",
+            package.path,
+            package_extract_dir.display(),
+            err
         ))
     })?;
 
-    let mut cpio = Command::new("cpio");
-    cpio.current_dir(root)
-        .arg("-idm")
-        .arg("-u")
-        .arg("--quiet")
-        .arg("--no-absolute-filenames")
-        .arg("--preserve-modification-time")
-        .arg("--no-preserve-owner")
-        .stdin(Stdio::from(rpm2cpio_stdout))
+    let archive_path = locate_rpm_archive_output(&package_extract_dir)?;
+    log_debug_line(format!(
+        "converted {} into archive {}",
+        package.path,
+        archive_path.display()
+    ));
+
+    let mut tar = Command::new("tar");
+    tar.arg("-xf")
+        .arg(&archive_path)
+        .arg("-C")
+        .arg(root)
+        .arg("--delay-directory-restore")
+        .arg("--no-same-owner")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let rendered_cpio = format!("(cd {} && {})", root.display(), render_command(&cpio));
-    log_debug_line(format!("run: {rendered_cpio}"));
-    let cpio_output = cpio
+    let rendered_tar = render_command(&tar);
+    log_debug_line(format!("run: {rendered_tar}"));
+    let tar_output = tar
         .output()
-        .map_err(|err| RgbsError::command(&rendered_cpio, err.to_string()))?;
-    let rpm2cpio_output = rpm2cpio_child
-        .wait_with_output()
-        .map_err(|err| RgbsError::command(&rendered_rpm2cpio, err.to_string()))?;
+        .map_err(|err| RgbsError::command(&rendered_tar, err.to_string()))?;
 
-    log_debug_line(format!(
-        "exit: {rendered_rpm2cpio} -> {}",
-        rpm2cpio_output.status
-    ));
-    let rpm2cpio_stdout_text = String::from_utf8_lossy(&rpm2cpio_output.stdout);
-    let rpm2cpio_stderr_text = String::from_utf8_lossy(&rpm2cpio_output.stderr);
-    if !rpm2cpio_stdout_text.trim().is_empty() {
+    log_debug_line(format!("exit: {rendered_tar} -> {}", tar_output.status));
+    let tar_stdout_text = String::from_utf8_lossy(&tar_output.stdout);
+    let tar_stderr_text = String::from_utf8_lossy(&tar_output.stderr);
+    if !tar_stdout_text.trim().is_empty() {
         log_debug_line(format!(
-            "stdout for `{rendered_rpm2cpio}`:\n{}",
-            rpm2cpio_stdout_text.trim_end()
+            "stdout for `{rendered_tar}`:\n{}",
+            tar_stdout_text.trim_end()
         ));
     }
-    if !rpm2cpio_stderr_text.trim().is_empty() {
+    if !tar_stderr_text.trim().is_empty() {
         log_debug_line(format!(
-            "stderr for `{rendered_rpm2cpio}`:\n{}",
-            rpm2cpio_stderr_text.trim_end()
+            "stderr for `{rendered_tar}`:\n{}",
+            tar_stderr_text.trim_end()
         ));
     }
-
-    log_debug_line(format!("exit: {rendered_cpio} -> {}", cpio_output.status));
-    let cpio_stdout_text = String::from_utf8_lossy(&cpio_output.stdout);
-    let cpio_stderr_text = String::from_utf8_lossy(&cpio_output.stderr);
-    if !cpio_stdout_text.trim().is_empty() {
-        log_debug_line(format!(
-            "stdout for `{rendered_cpio}`:\n{}",
-            cpio_stdout_text.trim_end()
-        ));
-    }
-    if !cpio_stderr_text.trim().is_empty() {
-        log_debug_line(format!(
-            "stderr for `{rendered_cpio}`:\n{}",
-            cpio_stderr_text.trim_end()
-        ));
-    }
-
-    if !rpm2cpio_output.status.success() {
+    if !tar_output.status.success() {
         return Err(RgbsError::command(
-            rendered_rpm2cpio,
-            if rpm2cpio_stderr_text.trim().is_empty() {
-                format!("exit status {}", rpm2cpio_output.status)
+            rendered_tar,
+            if tar_stderr_text.trim().is_empty() {
+                format!("exit status {}", tar_output.status)
             } else {
-                rpm2cpio_stderr_text.trim().to_string()
+                tar_stderr_text.trim().to_string()
             },
         ));
     }
-    if !cpio_output.status.success() {
-        return Err(RgbsError::command(
-            rendered_cpio,
-            if cpio_stderr_text.trim().is_empty() {
-                format!("exit status {}", cpio_output.status)
-            } else {
-                cpio_stderr_text.trim().to_string()
-            },
-        ));
-    }
+
+    fs::remove_dir_all(&package_extract_dir)
+        .map_err(|err| RgbsError::io(&package_extract_dir, err))?;
 
     Ok(())
+}
+
+fn locate_rpm_archive_output(directory: &Path) -> Result<PathBuf> {
+    let mut entries = Vec::new();
+    for entry in fs::read_dir(directory).map_err(|err| RgbsError::io(directory, err))? {
+        let path = entry.map_err(|err| RgbsError::io(directory, err))?.path();
+        if path.is_file()
+            && matches!(
+                path.extension().and_then(|value| value.to_str()),
+                Some("tar" | "tgz")
+            )
+        {
+            entries.push(path);
+        }
+    }
+    entries.sort();
+    match entries.len() {
+        1 => Ok(entries.remove(0)),
+        0 => Err(RgbsError::message(format!(
+            "rpm2archive did not create an archive under {}",
+            directory.display()
+        ))),
+        _ => Err(RgbsError::message(format!(
+            "rpm2archive created multiple archives under {}: {}",
+            directory.display(),
+            entries
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))),
+    }
 }
 
 fn query_installed_nevras(root: &Path) -> Result<HashSet<String>> {
@@ -2292,6 +2311,16 @@ mod tests {
         assert_eq!(summary.strategy, "shared_keep_packs");
         assert_eq!(summary.package_fingerprint, "pkgfp");
         assert_eq!(summary.installed_packages, 1);
+    }
+
+    #[test]
+    fn finds_single_rpm_archive_output() {
+        let fixture = TempDir::new().unwrap();
+        let archive = fixture.path().join("filesystem-3.1-4.1.armv7l.rpm.tgz");
+        fs::write(&archive, b"test").unwrap();
+
+        let located = locate_rpm_archive_output(fixture.path()).unwrap();
+        assert_eq!(located, archive);
     }
 
     fn sample_plan(repo: &Path, include_all: bool) -> ResolvedBuildPlan {
