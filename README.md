@@ -54,6 +54,7 @@ Run the CLI without installing:
 ```bash
 cargo run -p rgbs-cli -- build --help
 cargo run -p rgbs-cli -- doctor
+cargo run -p rgbs-cli -- fix --dry-run
 ```
 
 ## Install
@@ -69,6 +70,7 @@ After install, the command is:
 ```bash
 rgbs build --help
 rgbs doctor
+rgbs fix --dry-run
 ```
 
 ## Usage
@@ -85,6 +87,9 @@ Common examples:
 rgbs doctor
 rgbs doctor -A armv7l
 rgbs doctor -A aarch64
+rgbs fix --dry-run
+rgbs fix --dry-run -A armv7l
+rgbs fix --dry-run --with-source-build -A aarch64
 rgbs build -A armv7l
 rgbs build -A aarch64
 rgbs build -A aarch64 path/to/package
@@ -159,6 +164,34 @@ Scope note:
 
 - `doctor` checks host prerequisites and common toolchain expectations
 - package-specific `BuildRequires` are still resolved from the spec and repos during `rgbs build`
+
+## Fix
+
+`rgbs fix` installs missing host-side prerequisites on Ubuntu using `apt-get`.
+
+What it does today:
+
+- installs missing required runtime tools for `rgbs build`
+- installs recommended extras like `bubblewrap` and `createrepo_c`
+- installs common host toolchain packages
+- installs target cross-toolchain packages when `-A` selects a different target arch
+- optionally installs `rgbs` source-build prerequisites with `--with-source-build`
+
+Examples:
+
+```bash
+rgbs fix --dry-run
+rgbs fix --dry-run -A armv7l
+rgbs fix --dry-run --with-source-build -A aarch64
+rgbs fix -A armv7l -y
+```
+
+Notes:
+
+- `fix` is currently Ubuntu-only
+- it uses `apt-get` under the hood for stable scripted installs
+- use `--dry-run` to preview the exact packages and install command
+- use `--update` if you want `apt-get update` before install
 
 ## Output
 

@@ -152,6 +152,8 @@ rgbs build [GITDIR] -A <arch> -D <build.conf>
 rgbs build [GITDIR] -A <arch> --include-all
 rgbs build [GITDIR] -A <arch> --noinit
 rgbs build [GITDIR] -A <arch> --perf
+rgbs doctor [-A <arch>]
+rgbs fix [-A <arch>] [--with-source-build] [--dry-run]
 ```
 
 Priority flags to preserve in v1:
@@ -177,6 +179,12 @@ V1 target scope:
 - support only `armv7l` and `aarch64` as first-class build targets
 - reject other target arches instead of carrying a wider compatibility matrix through the resolver, buildroot, and toolchain paths
 - prefer explicit scope over partial support claims for x86 or other RPM arches
+
+Host setup decision:
+
+- keep prerequisite inspection and installation in-tree via `rgbs doctor` and Ubuntu-only `rgbs fix`
+- use `apt-get` for `fix` because the command is intended to be scriptable and predictable
+- keep package installation focused on host prerequisites; package-specific `BuildRequires` still belong to repo resolution and the build plan
 
 ## Core Technical Decisions
 

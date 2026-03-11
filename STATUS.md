@@ -51,6 +51,12 @@ Compatibility target:
   - source-build prerequisites
   - common host toolchain commands
   - optional cross-toolchain hints for `armv7l` and `aarch64`
+- `rgbs fix` Ubuntu prerequisite installation for:
+  - required runtime tools
+  - recommended extras
+  - common host toolchain packages
+  - target cross-toolchain packages for `armv7l` and `aarch64`
+  - optional source-build prerequisites via `--with-source-build`
 - repository metadata handling with:
   - rpm-md `repodata` support
   - legacy `builddata/build.xml` compatibility
@@ -120,3 +126,5 @@ Current workspace verification:
 - `cargo fmt`
 - `cargo test`
 - `cargo run -q -p rgbs-cli -- build --help`
+- `cargo run -q -p rgbs-cli -- fix --help`
+- `cargo run -q -p rgbs-cli -- fix --dry-run -A aarch64`
