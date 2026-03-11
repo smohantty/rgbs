@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::env;
 use std::fs;
 use std::io::{Read, Write};
@@ -20,7 +20,7 @@ use rgbs_repo::{
     PackageRecord, RepositoryState, ResolveRequest, ResolvedRepository, resolve_repositories,
 };
 use rgbs_resolver::solve_build_requires;
-use rgbs_spec::{InspectRequest, SpecInfo, inspect_spec};
+use rgbs_spec::{InspectRequest, SpecInfo, discover_spec_paths, inspect_spec};
 use serde::{Deserialize, Serialize};
 use url::Url;
 use walkdir::WalkDir;
@@ -191,18 +191,64 @@ pub struct BuildOutcome {
     pub execution: String,
     pub plan: ResolvedBuildPlan,
     pub repository: Option<RepositorySummary>,
-    pub spec: SpecInfo,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spec: Option<SpecInfo>,
     pub dependencies: Option<DependencyResolution>,
     pub downloads: Vec<DownloadedPackage>,
     pub buildroot: Option<BuildRootSummary>,
-    pub stage: StageSummary,
-    pub runner: RunnerSummary,
-    pub artifacts: ArtifactSummary,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stage: Option<StageSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runner: Option<RunnerSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifacts: Option<ArtifactSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub logs: Option<BuildLogsSummary>,
     pub warnings: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub performance: Option<PerformanceSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<WorkspaceBuildSummary>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkspaceBuildSummary {
+    pub package_count: usize,
+    pub build_order: Vec<String>,
+    pub local_overlay_repo: Option<String>,
+    pub packages: Vec<WorkspacePackageResult>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkspacePackageResult {
+    pub name: String,
+    pub git_dir: String,
+    pub spec_path: String,
+    pub local_dependencies: Vec<String>,
+    pub local_reverse_dependencies: Vec<String>,
+    pub outcome: BuildOutcome,
+}
+
+#[derive(Debug, Clone)]
+struct WorkspacePackage {
+    id: String,
+    git_dir: PathBuf,
+    spec: SpecInfo,
+    provides: HashSet<String>,
+}
+
+#[derive(Debug, Clone)]
+struct WorkspaceCandidate {
+    git_dir: PathBuf,
+    spec_path: PathBuf,
+}
+
+#[derive(Debug)]
+struct WorkspacePlan {
+    packages: Vec<WorkspacePackage>,
+    order: Vec<String>,
+    local_dependency_ids: HashMap<String, Vec<String>>,
+    local_reverse_dependency_ids: HashMap<String, Vec<String>>,
 }
 
 fn progress(action: &str, message: impl AsRef<str>) {
@@ -219,6 +265,15 @@ fn progress_warn(message: impl AsRef<str>) {
 }
 
 pub fn execute_build(plan: &ResolvedBuildPlan) -> Result<BuildOutcome> {
+    let candidates = discover_workspace_candidates(plan)?;
+    if candidates.len() > 1 {
+        let workspace = discover_workspace_plan(plan, &candidates)?;
+        return execute_workspace_build(plan, workspace);
+    }
+    execute_single_build(plan)
+}
+
+fn execute_single_build(plan: &ResolvedBuildPlan) -> Result<BuildOutcome> {
     let total_started = Instant::now();
     let cached_buildroot = if plan.noinit {
         progress(
@@ -497,13 +552,13 @@ pub fn execute_build(plan: &ResolvedBuildPlan) -> Result<BuildOutcome> {
         execution: "completed".to_string(),
         plan: plan.clone(),
         repository: repo_state.as_ref().map(repository_summary),
-        spec,
+        spec: Some(spec),
         dependencies,
         downloads,
         buildroot,
-        stage: stage.summary,
-        runner: runner.summary,
-        artifacts,
+        stage: Some(stage.summary),
+        runner: Some(runner.summary),
+        artifacts: Some(artifacts),
         logs: current_build_log_paths().map(|paths| BuildLogsSummary {
             session_dir: path_to_string(&paths.session_dir),
             progress_log: path_to_string(&paths.progress_log),
@@ -513,7 +568,493 @@ pub fn execute_build(plan: &ResolvedBuildPlan) -> Result<BuildOutcome> {
         }),
         warnings,
         performance,
+        workspace: None,
     })
+}
+
+fn execute_workspace_build(
+    plan: &ResolvedBuildPlan,
+    workspace: WorkspacePlan,
+) -> Result<BuildOutcome> {
+    let total_started = Instant::now();
+    let package_count = workspace.packages.len();
+    let output_repo = workspace_output_repo(plan);
+    let overlay_repo = output_repo.join("RPMS");
+    let requires_local_overlay = workspace
+        .local_dependency_ids
+        .values()
+        .any(|dependencies| !dependencies.is_empty());
+
+    if plan.clean_repos && output_repo.exists() {
+        fs::remove_dir_all(&output_repo).map_err(|err| RgbsError::io(&output_repo, err))?;
+    }
+    ensure_dir(&overlay_repo)?;
+    ensure_dir(&output_repo.join("SRPMS"))?;
+
+    if requires_local_overlay && !command_in_path("createrepo_c") {
+        return Err(RgbsError::message(
+            "workspace builds with local package dependencies require `createrepo_c` so newly built RPMs can be fed back into dependency resolution",
+        ));
+    }
+
+    progress(
+        "Workspace",
+        format!(
+            "building {} local packages with a Cargo-style dependency queue",
+            package_count
+        ),
+    );
+
+    let package_lookup = workspace
+        .packages
+        .iter()
+        .map(|package| (package.id.clone(), package))
+        .collect::<HashMap<_, _>>();
+    let mut results = Vec::new();
+    let mut built_order = Vec::new();
+    let mut completed = HashSet::new();
+
+    for (index, package_id) in workspace.order.iter().enumerate() {
+        let package = package_lookup.get(package_id).copied().ok_or_else(|| {
+            RgbsError::message(format!(
+                "workspace package missing from lookup: {package_id}"
+            ))
+        })?;
+        let local_dependency_ids = workspace
+            .local_dependency_ids
+            .get(package_id)
+            .cloned()
+            .unwrap_or_default();
+        if !local_dependency_ids
+            .iter()
+            .all(|dependency| completed.contains(dependency))
+        {
+            return Err(RgbsError::message(format!(
+                "workspace scheduler attempted to build {} before its local dependencies were complete",
+                package.spec.name
+            )));
+        }
+
+        progress(
+            "Scheduling",
+            format!(
+                "package {} ({}/{})",
+                package.spec.name,
+                index + 1,
+                package_count
+            ),
+        );
+
+        let package_plan = workspace_package_plan(
+            plan,
+            package,
+            overlay_repo_has_metadata(&overlay_repo),
+            &overlay_repo,
+        );
+        let outcome = execute_single_build(&package_plan)?;
+        if outcome
+            .artifacts
+            .as_ref()
+            .map(|artifacts| artifacts.rpms.is_empty())
+            .unwrap_or(true)
+        {
+            progress_warn(format!(
+                "workspace package {} produced no RPMs for the local overlay repo",
+                package.spec.name
+            ));
+        }
+
+        completed.insert(package_id.clone());
+        built_order.push(package.spec.name.clone());
+        results.push(WorkspacePackageResult {
+            name: package.spec.name.clone(),
+            git_dir: path_to_string(&package.git_dir),
+            spec_path: package.spec.spec_path.clone(),
+            local_dependencies: package_names_for_ids(&package_lookup, &local_dependency_ids),
+            local_reverse_dependencies: package_names_for_ids(
+                &package_lookup,
+                workspace
+                    .local_reverse_dependency_ids
+                    .get(package_id)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]),
+            ),
+            outcome,
+        });
+    }
+
+    let workspace_summary = WorkspaceBuildSummary {
+        package_count,
+        build_order: built_order.clone(),
+        local_overlay_repo: overlay_repo
+            .join("repodata/repomd.xml")
+            .exists()
+            .then(|| path_to_string(&overlay_repo)),
+        packages: results,
+    };
+    let warnings = if requires_local_overlay {
+        Vec::new()
+    } else {
+        vec!["workspace package set had no local build-order edges; packages were built in discovered order".to_string()]
+    };
+    progress(
+        "Finished",
+        format!(
+            "workspace build complete in {} ms",
+            duration_ms(total_started.elapsed())
+        ),
+    );
+
+    Ok(BuildOutcome {
+        execution: "workspace_completed".to_string(),
+        plan: plan.clone(),
+        repository: None,
+        spec: None,
+        dependencies: None,
+        downloads: Vec::new(),
+        buildroot: None,
+        stage: None,
+        runner: None,
+        artifacts: None,
+        logs: current_build_log_paths().map(|paths| BuildLogsSummary {
+            session_dir: path_to_string(&paths.session_dir),
+            progress_log: path_to_string(&paths.progress_log),
+            debug_log: path_to_string(&paths.debug_log),
+            plan_json: path_to_string(&paths.plan_json),
+            config_snapshot: path_to_string(&paths.config_snapshot),
+        }),
+        warnings,
+        performance: None,
+        workspace: Some(workspace_summary),
+    })
+}
+
+fn discover_workspace_candidates(plan: &ResolvedBuildPlan) -> Result<Vec<WorkspaceCandidate>> {
+    let root = PathBuf::from(&plan.git_dir);
+    if let Some(spec) = plan.spec.as_ref() {
+        let packaging_dir = resolve_packaging_dir_for_package(&root, &plan.packaging_dir);
+        let spec_path = discover_spec_paths(&root, &packaging_dir, Some(&PathBuf::from(spec)))?
+            .into_iter()
+            .next()
+            .ok_or_else(|| RgbsError::message("explicit spec selection returned no spec path"))?;
+        return Ok(vec![WorkspaceCandidate {
+            git_dir: root,
+            spec_path,
+        }]);
+    }
+
+    let package_dirs = discover_workspace_package_dirs(plan)?;
+    let mut candidates = Vec::new();
+    for package_dir in package_dirs {
+        let packaging_dir = resolve_packaging_dir_for_package(&package_dir, &plan.packaging_dir);
+        for spec_path in discover_spec_paths(&package_dir, &packaging_dir, None)? {
+            candidates.push(WorkspaceCandidate {
+                git_dir: package_dir.clone(),
+                spec_path,
+            });
+        }
+    }
+    Ok(candidates)
+}
+
+fn discover_workspace_plan(
+    plan: &ResolvedBuildPlan,
+    candidates: &[WorkspaceCandidate],
+) -> Result<WorkspacePlan> {
+    let mut packages = Vec::new();
+    let buildconf = workspace_inspection_buildconf(plan)?;
+
+    for candidate in candidates {
+        let spec = inspect_spec(&InspectRequest {
+            git_dir: candidate.git_dir.clone(),
+            packaging_dir: plan.packaging_dir.clone(),
+            spec_override: Some(candidate.spec_path.clone()),
+            buildconf: buildconf.clone(),
+            defines: plan.defines.clone(),
+        })?;
+        let provides = spec
+            .provides
+            .iter()
+            .cloned()
+            .chain(spec.binary_packages.iter().cloned())
+            .chain(std::iter::once(spec.name.clone()))
+            .collect::<HashSet<_>>();
+        packages.push(WorkspacePackage {
+            id: path_to_string(&candidate.spec_path),
+            git_dir: candidate.git_dir.clone(),
+            spec,
+            provides,
+        });
+    }
+
+    if packages.is_empty() {
+        return Err(RgbsError::message(format!(
+            "no package specs found under {}",
+            plan.git_dir
+        )));
+    }
+
+    let mut providers = HashMap::<String, Vec<String>>::new();
+    for package in &packages {
+        for provide in &package.provides {
+            providers
+                .entry(provide.clone())
+                .or_default()
+                .push(package.id.clone());
+        }
+    }
+
+    let mut local_dependency_ids = HashMap::<String, Vec<String>>::new();
+    let mut local_reverse_dependency_ids = HashMap::<String, Vec<String>>::new();
+    let mut pending_counts = HashMap::<String, usize>::new();
+    let mut ready = VecDeque::new();
+
+    for package in &packages {
+        let mut dependencies = Vec::new();
+        for requirement in &package.spec.build_requires {
+            let Some(matches) = providers.get(&requirement.name) else {
+                continue;
+            };
+            let candidates = matches
+                .iter()
+                .filter(|candidate| *candidate != &package.id)
+                .cloned()
+                .collect::<Vec<_>>();
+            if candidates.is_empty() {
+                continue;
+            }
+            let dependency = resolve_local_dependency(
+                &package.spec.name,
+                &requirement.name,
+                &candidates,
+                &packages,
+            )?;
+            if !dependencies.contains(&dependency) {
+                dependencies.push(dependency);
+            }
+        }
+        dependencies.sort();
+        pending_counts.insert(package.id.clone(), dependencies.len());
+        if dependencies.is_empty() {
+            ready.push_back(package.id.clone());
+        }
+        for dependency in &dependencies {
+            local_reverse_dependency_ids
+                .entry(dependency.clone())
+                .or_default()
+                .push(package.id.clone());
+        }
+        local_dependency_ids.insert(package.id.clone(), dependencies);
+    }
+
+    let mut order = Vec::new();
+    while let Some(package_id) = ready.pop_front() {
+        order.push(package_id.clone());
+        let dependents = local_reverse_dependency_ids
+            .get(&package_id)
+            .cloned()
+            .unwrap_or_default();
+        for dependent in dependents {
+            let count = pending_counts.get_mut(&dependent).ok_or_else(|| {
+                RgbsError::message(format!("workspace pending count missing for {dependent}"))
+            })?;
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                ready.push_back(dependent);
+            }
+        }
+    }
+
+    if order.len() != packages.len() {
+        let blocked = packages
+            .iter()
+            .filter(|package| !order.contains(&package.id))
+            .map(|package| package.spec.name.clone())
+            .collect::<Vec<_>>();
+        return Err(RgbsError::message(format!(
+            "workspace package dependency cycle detected among: {}",
+            blocked.join(", ")
+        )));
+    }
+
+    for dependencies in local_dependency_ids.values_mut() {
+        dependencies.sort();
+        dependencies.dedup();
+    }
+    for dependents in local_reverse_dependency_ids.values_mut() {
+        dependents.sort();
+        dependents.dedup();
+    }
+
+    Ok(WorkspacePlan {
+        packages,
+        order,
+        local_dependency_ids,
+        local_reverse_dependency_ids,
+    })
+}
+
+fn resolve_local_dependency(
+    package_name: &str,
+    requirement: &str,
+    candidates: &[String],
+    packages: &[WorkspacePackage],
+) -> Result<String> {
+    if candidates.len() == 1 {
+        return Ok(candidates[0].clone());
+    }
+
+    let preferred = candidates
+        .iter()
+        .find(|candidate| {
+            packages.iter().any(|package| {
+                &package.id == *candidate
+                    && (package.spec.name == requirement
+                        || package
+                            .spec
+                            .binary_packages
+                            .iter()
+                            .any(|binary| binary == requirement))
+            })
+        })
+        .cloned();
+    if let Some(preferred) = preferred {
+        return Ok(preferred);
+    }
+
+    let providers = candidates
+        .iter()
+        .filter_map(|candidate| {
+            packages
+                .iter()
+                .find(|package| &package.id == candidate)
+                .map(|package| package.spec.name.clone())
+        })
+        .collect::<Vec<_>>();
+    Err(RgbsError::message(format!(
+        "workspace local dependency `{requirement}` for package `{package_name}` is ambiguous across: {}",
+        providers.join(", ")
+    )))
+}
+
+fn workspace_inspection_buildconf(plan: &ResolvedBuildPlan) -> Result<Option<PathBuf>> {
+    if let Some(buildconf) = plan.buildconf.as_ref() {
+        return Ok(Some(PathBuf::from(buildconf)));
+    }
+    if plan.noinit {
+        return load_active_buildroot(plan).map(|state| state.buildconf_path.map(PathBuf::from));
+    }
+
+    let state = resolve_repositories(&ResolveRequest {
+        arch: plan.arch.clone(),
+        repos: plan.repos.clone(),
+        explicit_buildconf: plan.buildconf.clone(),
+        clean_cache: plan.clean_repos,
+    })?;
+    Ok(state.buildconf.map(PathBuf::from))
+}
+
+fn package_names_for_ids(
+    package_lookup: &HashMap<String, &WorkspacePackage>,
+    ids: &[String],
+) -> Vec<String> {
+    ids.iter()
+        .map(|id| {
+            package_lookup
+                .get(id)
+                .map(|package| package.spec.name.clone())
+                .unwrap_or_else(|| id.clone())
+        })
+        .collect()
+}
+
+fn discover_workspace_package_dirs(plan: &ResolvedBuildPlan) -> Result<Vec<PathBuf>> {
+    let root = PathBuf::from(&plan.git_dir);
+    let mut dirs = Vec::new();
+    if has_package_specs(&root, &plan.packaging_dir)? {
+        dirs.push(root.clone());
+    }
+    for entry in WalkDir::new(&root)
+        .min_depth(1)
+        .into_iter()
+        .filter_entry(|entry| entry.file_name() != ".git")
+    {
+        let entry = entry.map_err(|err| RgbsError::message(err.to_string()))?;
+        if !entry.file_type().is_dir() {
+            continue;
+        }
+        let candidate = entry.path().to_path_buf();
+        if candidate == root {
+            continue;
+        }
+        if !candidate.join(".git").exists() {
+            continue;
+        }
+        if has_package_specs(&candidate, &plan.packaging_dir)? {
+            dirs.push(candidate);
+        }
+    }
+    dirs.sort();
+    dirs.dedup();
+    Ok(dirs)
+}
+
+fn has_package_specs(git_dir: &Path, packaging_dir: &str) -> Result<bool> {
+    let packaging_dir = resolve_packaging_dir_for_package(git_dir, packaging_dir);
+    if !packaging_dir.is_dir() {
+        return Ok(false);
+    }
+    Ok(fs::read_dir(&packaging_dir)
+        .map_err(|err| RgbsError::io(&packaging_dir, err))?
+        .filter_map(|entry| entry.ok())
+        .any(|entry| entry.path().extension().and_then(|value| value.to_str()) == Some("spec")))
+}
+
+fn resolve_packaging_dir_for_package(git_dir: &Path, packaging_dir: &str) -> PathBuf {
+    let path = PathBuf::from(packaging_dir);
+    if path.is_absolute() {
+        path
+    } else {
+        git_dir.join(path)
+    }
+}
+
+fn workspace_package_plan(
+    plan: &ResolvedBuildPlan,
+    package: &WorkspacePackage,
+    include_overlay_repo: bool,
+    overlay_repo: &Path,
+) -> ResolvedBuildPlan {
+    let mut package_plan = plan.clone();
+    package_plan.git_dir = path_to_string(&package.git_dir);
+    package_plan.work_dir = path_to_string(&package.git_dir);
+    package_plan.spec = Some(package.spec.spec_path.clone());
+    package_plan.clean_repos = false;
+    if include_overlay_repo {
+        package_plan.repos.push(rgbs_config::ResolvedRepo {
+            name: "repo.local_overlay".to_string(),
+            kind: rgbs_config::RepoKind::LocalPath,
+            location: path_to_string(overlay_repo),
+            raw_location: path_to_string(overlay_repo),
+            source: "workspace".to_string(),
+            user: None,
+            authenticated: false,
+            password: None,
+        });
+    }
+    package_plan
+}
+
+fn workspace_output_repo(plan: &ResolvedBuildPlan) -> PathBuf {
+    let profile_name = plan.profile.name.trim_start_matches("profile.");
+    PathBuf::from(&plan.buildroot)
+        .join("repos")
+        .join(profile_name)
+        .join(&plan.arch)
+}
+
+fn overlay_repo_has_metadata(overlay_repo: &Path) -> bool {
+    overlay_repo.join("repodata/repomd.xml").exists()
 }
 
 fn repository_summary(state: &RepositoryState) -> RepositorySummary {
@@ -2681,6 +3222,142 @@ mod tests {
         assert!(root.join("lib/firmware/existing").is_dir());
     }
 
+    #[test]
+    fn discovers_workspace_order_from_local_build_requires() {
+        let fixture = TempDir::new().unwrap();
+        let workspace = fixture.path().join("workspace");
+        let pkg_a = workspace.join("pkg-a");
+        let pkg_b = workspace.join("pkg-b");
+        fs::create_dir_all(pkg_a.join("packaging")).unwrap();
+        fs::create_dir_all(pkg_b.join("packaging")).unwrap();
+        write_spec(
+            &pkg_a.join("packaging/pkg-a.spec"),
+            "Name: pkg-a\nVersion: 1.0\nRelease: 1\nSummary: pkg-a\nLicense: MIT\nBuildRequires: pkg-b\n%description\npkg-a\n",
+        );
+        write_spec(
+            &pkg_b.join("packaging/pkg-b.spec"),
+            "Name: pkg-b\nVersion: 1.0\nRelease: 1\nSummary: pkg-b\nLicense: MIT\n%description\npkg-b\n",
+        );
+        init_git_repo(&pkg_a);
+        init_git_repo(&pkg_b);
+
+        let buildconf = fixture.path().join("build.conf");
+        fs::write(&buildconf, "%define distro test\n").unwrap();
+
+        let mut plan = sample_plan(&workspace, false);
+        plan.buildconf = Some(path_to_string(&buildconf));
+
+        let candidates = discover_workspace_candidates(&plan).unwrap();
+        assert_eq!(candidates.len(), 2);
+
+        let workspace = discover_workspace_plan(&plan, &candidates).unwrap();
+        let package_names = workspace
+            .order
+            .iter()
+            .map(|id| {
+                workspace
+                    .packages
+                    .iter()
+                    .find(|package| &package.id == id)
+                    .unwrap()
+                    .spec
+                    .name
+                    .clone()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            package_names,
+            vec!["pkg-b".to_string(), "pkg-a".to_string()]
+        );
+
+        let pkg_a_id = workspace
+            .packages
+            .iter()
+            .find(|package| package.spec.name == "pkg-a")
+            .unwrap()
+            .id
+            .clone();
+        let pkg_b_id = workspace
+            .packages
+            .iter()
+            .find(|package| package.spec.name == "pkg-b")
+            .unwrap()
+            .id
+            .clone();
+        assert_eq!(
+            workspace.local_dependency_ids.get(&pkg_a_id).unwrap(),
+            &vec![pkg_b_id.clone()]
+        );
+        assert_eq!(
+            workspace
+                .local_reverse_dependency_ids
+                .get(&pkg_b_id)
+                .unwrap(),
+            &vec![pkg_a_id]
+        );
+    }
+
+    #[test]
+    fn detects_workspace_dependency_cycles() {
+        let fixture = TempDir::new().unwrap();
+        let workspace = fixture.path().join("workspace");
+        let pkg_a = workspace.join("pkg-a");
+        let pkg_b = workspace.join("pkg-b");
+        fs::create_dir_all(pkg_a.join("packaging")).unwrap();
+        fs::create_dir_all(pkg_b.join("packaging")).unwrap();
+        write_spec(
+            &pkg_a.join("packaging/pkg-a.spec"),
+            "Name: pkg-a\nVersion: 1.0\nRelease: 1\nSummary: pkg-a\nLicense: MIT\nBuildRequires: pkg-b\n%description\npkg-a\n",
+        );
+        write_spec(
+            &pkg_b.join("packaging/pkg-b.spec"),
+            "Name: pkg-b\nVersion: 1.0\nRelease: 1\nSummary: pkg-b\nLicense: MIT\nBuildRequires: pkg-a\n%description\npkg-b\n",
+        );
+        init_git_repo(&pkg_a);
+        init_git_repo(&pkg_b);
+
+        let buildconf = fixture.path().join("build.conf");
+        fs::write(&buildconf, "%define distro test\n").unwrap();
+
+        let mut plan = sample_plan(&workspace, false);
+        plan.buildconf = Some(path_to_string(&buildconf));
+
+        let candidates = discover_workspace_candidates(&plan).unwrap();
+        let error = discover_workspace_plan(&plan, &candidates).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("workspace package dependency cycle detected")
+        );
+    }
+
+    #[test]
+    fn explicit_spec_selection_disables_workspace_scan() {
+        let fixture = TempDir::new().unwrap();
+        let workspace = fixture.path().join("workspace");
+        let root_packaging = workspace.join("packaging");
+        let nested = workspace.join("nested");
+        fs::create_dir_all(&root_packaging).unwrap();
+        fs::create_dir_all(nested.join("packaging")).unwrap();
+        write_spec(
+            &root_packaging.join("root.spec"),
+            "Name: root\nVersion: 1.0\nRelease: 1\nSummary: root\nLicense: MIT\n%description\nroot\n",
+        );
+        write_spec(
+            &nested.join("packaging/nested.spec"),
+            "Name: nested\nVersion: 1.0\nRelease: 1\nSummary: nested\nLicense: MIT\n%description\nnested\n",
+        );
+        init_git_repo(&workspace);
+        init_git_repo(&nested);
+
+        let mut plan = sample_plan(&workspace, false);
+        plan.spec = Some(path_to_string(&root_packaging.join("root.spec")));
+
+        let candidates = discover_workspace_candidates(&plan).unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].git_dir, workspace);
+    }
+
     fn sample_plan(repo: &Path, include_all: bool) -> ResolvedBuildPlan {
         let buildroot = repo.parent().unwrap().join("buildroot");
         ResolvedBuildPlan {
@@ -2728,9 +3405,15 @@ mod tests {
             name: "test".to_string(),
             version: "1.0".to_string(),
             release: "1".to_string(),
+            binary_packages: vec!["test".to_string()],
+            provides: vec!["test".to_string()],
             build_requires: Vec::new(),
             sources: Vec::new(),
         }
+    }
+
+    fn write_spec(path: &Path, body: &str) {
+        fs::write(path, body).unwrap();
     }
 
     fn init_git_repo(repo: &Path) {

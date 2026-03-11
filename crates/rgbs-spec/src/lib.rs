@@ -28,6 +28,8 @@ pub struct SpecInfo {
     pub name: String,
     pub version: String,
     pub release: String,
+    pub binary_packages: Vec<String>,
+    pub provides: Vec<String>,
     pub build_requires: Vec<Requirement>,
     pub sources: Vec<String>,
 }
@@ -46,6 +48,8 @@ pub fn inspect_spec(request: &InspectRequest) -> Result<SpecInfo> {
         .transpose()?
         .unwrap_or_default();
     let (name, version, release) = query_nvr(&spec_path, &buildconf_defines, &request.defines)?;
+    let binary_packages = query_binary_packages(&spec_path, &buildconf_defines, &request.defines)?;
+    let provides = query_provides(&spec_path, &buildconf_defines, &request.defines)?;
     let build_requires = query_build_requires(&spec_path, &buildconf_defines, &request.defines)?;
     let expanded = preprocess_spec(&spec_path, &buildconf_defines, &request.defines)?;
     let sources = parse_source_tags(&expanded);
@@ -56,16 +60,18 @@ pub fn inspect_spec(request: &InspectRequest) -> Result<SpecInfo> {
         name,
         version,
         release,
+        binary_packages,
+        provides,
         build_requires,
         sources,
     })
 }
 
-pub fn discover_spec_path(
+pub fn discover_spec_paths(
     git_dir: &Path,
     packaging_dir: &Path,
     spec_override: Option<&PathBuf>,
-) -> Result<PathBuf> {
+) -> Result<Vec<PathBuf>> {
     if let Some(spec) = spec_override {
         let candidate = if spec.is_absolute() {
             spec.clone()
@@ -78,7 +84,7 @@ pub fn discover_spec_path(
                 candidate.display()
             )));
         }
-        return Ok(candidate);
+        return Ok(vec![candidate]);
     }
 
     let mut specs = fs::read_dir(packaging_dir)
@@ -101,10 +107,20 @@ pub fn discover_spec_path(
         .unwrap_or_default();
     let preferred = packaging_dir.join(format!("{project_name}.spec"));
     if preferred.exists() {
-        Ok(preferred)
+        let mut ordered = vec![preferred.clone()];
+        ordered.extend(specs.into_iter().filter(|path| path != &preferred));
+        Ok(ordered)
     } else {
-        Ok(specs.remove(0))
+        Ok(specs)
     }
+}
+
+pub fn discover_spec_path(
+    git_dir: &Path,
+    packaging_dir: &Path,
+    spec_override: Option<&PathBuf>,
+) -> Result<PathBuf> {
+    discover_spec_paths(git_dir, packaging_dir, spec_override).map(|mut specs| specs.remove(0))
 }
 
 fn resolve_packaging_dir(git_dir: &Path, packaging_dir: &str) -> PathBuf {
@@ -165,6 +181,55 @@ fn query_build_requires(
         requirements.push(parse_requirement(trimmed));
     }
     Ok(requirements)
+}
+
+fn query_binary_packages(
+    spec_path: &Path,
+    buildconf_defines: &[String],
+    defines: &[String],
+) -> Result<Vec<String>> {
+    let output = rpmspec(
+        spec_path,
+        &["--query", "--queryformat", "%{NAME}\n"],
+        buildconf_defines,
+        defines,
+    )?;
+    let mut packages = output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    packages.sort();
+    packages.dedup();
+    Ok(packages)
+}
+
+fn query_provides(
+    spec_path: &Path,
+    buildconf_defines: &[String],
+    defines: &[String],
+) -> Result<Vec<String>> {
+    let output = rpmspec(
+        spec_path,
+        &["--query", "--provides"],
+        buildconf_defines,
+        defines,
+    )?;
+    let mut provides = output
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                trimmed.split_whitespace().next().map(ToOwned::to_owned)
+            }
+        })
+        .collect::<Vec<_>>();
+    provides.sort();
+    provides.dedup();
+    Ok(provides)
 }
 
 fn preprocess_spec(
@@ -290,7 +355,7 @@ mod tests {
         let fixture = Fixture::new("fake");
         fixture.write(
             "packaging/fake.spec",
-            "Name: fake\nVersion: 1.0\nRelease: 1\nSummary: test\nLicense: GPL\nSource0: %{name}-%{version}.tar.gz\nBuildRequires: flex\nBuildRequires: pkgconfig(alsa)\n%description\ntest\n",
+            "Name: fake\nVersion: 1.0\nRelease: 1\nSummary: test\nLicense: GPL\nSource0: %{name}-%{version}.tar.gz\nBuildRequires: flex\nBuildRequires: pkgconfig(alsa)\nProvides: cap-main\n%description\ntest\n%package devel\nSummary: devel\nProvides: cap-devel\n%description devel\ntest\n",
         );
 
         let info = inspect_spec(&InspectRequest {
@@ -303,8 +368,32 @@ mod tests {
         .unwrap();
 
         assert_eq!(info.name, "fake");
+        assert!(info.binary_packages.iter().any(|item| item == "fake"));
+        assert!(info.binary_packages.iter().any(|item| item == "fake-devel"));
+        assert!(info.provides.iter().any(|item| item == "cap-main"));
+        assert!(info.provides.iter().any(|item| item == "cap-devel"));
         assert!(info.build_requires.iter().any(|item| item.name == "flex"));
         assert!(info.sources.iter().any(|item| item == "fake-1.0.tar.gz"));
+    }
+
+    #[test]
+    fn discovers_all_specs_in_preferred_order() {
+        let fixture = Fixture::new("demo");
+        fixture.write(
+            "packaging/demo.spec",
+            "Name: demo\nVersion: 1\nRelease: 1\nSummary: test\nLicense: GPL\n",
+        );
+        fixture.write(
+            "packaging/addon.spec",
+            "Name: addon\nVersion: 1\nRelease: 1\nSummary: test\nLicense: GPL\n",
+        );
+
+        let specs = discover_spec_paths(&fixture.git_dir, &fixture.packaging_dir, None).unwrap();
+        let names = specs
+            .iter()
+            .filter_map(|path| path.file_name().and_then(|value| value.to_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["demo.spec", "addon.spec"]);
     }
 
     struct Fixture {

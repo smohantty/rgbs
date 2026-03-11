@@ -603,6 +603,8 @@ mod tests {
             name: "fake".to_string(),
             version: "1.0".to_string(),
             release: "1".to_string(),
+            binary_packages: vec!["fake".to_string()],
+            provides: vec!["fake".to_string()],
             build_requires: vec![
                 Requirement {
                     name: "bash".to_string(),
@@ -686,6 +688,8 @@ mod tests {
             name: "fake".to_string(),
             version: "1.0".to_string(),
             release: "1".to_string(),
+            binary_packages: vec!["fake".to_string()],
+            provides: vec!["fake".to_string()],
             build_requires: vec![
                 Requirement {
                     name: "bash".to_string(),

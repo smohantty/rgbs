@@ -94,6 +94,11 @@ Compatibility target:
   - RPM/SRPM collection
   - output repo layout under the configured buildroot
   - `createrepo_c` refresh when available
+- workspace package-set builds with:
+  - nested local package repo discovery under the requested tree
+  - local `BuildRequires` graph ordering across discovered specs
+  - cycle detection for local package dependency loops
+  - local overlay repo feedback so newly built RPMs are available to later package builds
 - warm-build behavior with:
   - stage reuse
   - cached-build skip behavior unless `--overwrite` forces rebuild
@@ -129,6 +134,7 @@ Compatibility target:
 - the CLI crate/package is still named `rgbs-cli`
 - the released binary name is `rgbs`
 - `bwrap` is preferred for isolation, but host `rpmbuild` remains the fallback when the prepared root is not runnable enough
+- workspace package-set builds currently use a deterministic sequential scheduler; parallel workers and more aggressive depanneur-style scheduling can come after real-package validation
 
 ## Verification Baseline
 

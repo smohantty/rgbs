@@ -5,6 +5,7 @@ Rust reimplementation of the old GBS local build path.
 Current scope:
 
 - local package builds only
+- local package-set builds across nested git repos under a workspace tree
 - target architectures limited to `armv7l` and `aarch64`
 - `.gbs.conf` compatibility for local build use cases
 - rpm-md repository resolution and `build.conf` handling
@@ -96,6 +97,7 @@ rgbs -c path/to/custom.gbs.conf build -A aarch64
 rgbs build -A armv7l
 rgbs build -A aarch64
 rgbs build -A aarch64 path/to/package
+rgbs build -A aarch64 path/to/workspace-tree
 rgbs build -A aarch64 -P profile.myprofile
 rgbs build -A aarch64 -R https://example.com/repo
 rgbs build -A aarch64 --include-all
@@ -134,14 +136,16 @@ Supported target architectures:
 `rgbs` currently runs this pipeline:
 
 1. load `.gbs.conf`
-2. resolve repos and `build.conf`
-3. inspect the spec and evaluated `BuildRequires`
-4. solve dependencies with `libsolv`
-5. download and cache RPMs
-6. create or reuse the buildroot
-7. stage sources and spec
-8. run `rpmbuild`
-9. collect RPM/SRPM artifacts into the output repo layout
+2. discover package specs under the requested tree
+3. if multiple local packages are found, build them in local `BuildRequires` order and feed each package's output RPMs back through the local overlay repo
+4. resolve repos and `build.conf`
+5. inspect the spec and evaluated `BuildRequires`
+6. solve dependencies with `libsolv`
+7. download and cache RPMs
+8. create or reuse the buildroot
+9. stage sources and spec
+10. run `rpmbuild`
+11. collect RPM/SRPM artifacts into the output repo layout
 
 During `rgbs build`, concise cargo-style stage status lines are streamed to stderr so users can see which step is active while stdout remains reserved for the final JSON result.
 
@@ -167,6 +171,8 @@ Current selection order is:
 - `--spec <FILE>`, if provided
 - `<gitdir>/<packaging_dir>/<repo-name>.spec`, if it exists
 - the first `.spec` file in the packaging dir after lexical sort
+
+When `--spec` is provided, `rgbs` treats the build as an explicit single-spec selection and does not scan the rest of the workspace tree for additional local packages.
 
 If no spec file exists under the packaging dir, the build fails.
 

@@ -129,6 +129,7 @@ Implemented in tree:
 - [x] source/spec staging with committed-tree export by default and working-tree export for `--include-all`
 - [x] `rpmbuild` execution through host or `bwrap`, artifact collection, and `--overwrite`-aware build skipping via persisted build stamps
 - [x] optional per-build performance reporting via `--perf` / `--time`, covering stage timings and cache/reuse stats
+- [x] initial depanneur replacement for local package sets: nested package discovery, local BuildRequires graph ordering, cycle detection, and overlay repo feedback between package builds
 
 Remaining before v1 signoff:
 
