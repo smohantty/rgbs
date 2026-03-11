@@ -101,7 +101,7 @@ Compatibility target:
   - total wall time
   - per-stage timings
   - cache and reuse indicators
-- streamed stderr progress logs for build stages:
+- streamed cargo-style stderr status lines for build stages:
   - config load
   - repository/spec/dependency/download/buildroot/stage/rpmbuild/artifact progress
   - fallback warnings for runner backend changes

@@ -1,6 +1,6 @@
 use std::ffi::OsStr;
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::{Mutex, OnceLock};
@@ -11,6 +11,7 @@ use thiserror::Error;
 
 pub type Result<T> = std::result::Result<T, RgbsError>;
 pub const SUPPORTED_TARGET_ARCHES: [&str; 2] = ["armv7l", "aarch64"];
+const STATUS_LABEL_WIDTH: usize = 12;
 
 #[derive(Debug, Clone)]
 pub struct BuildLogPaths {
@@ -213,6 +214,41 @@ pub fn log_debug_line(message: impl AsRef<str>) {
 
 pub fn write_debug_file(path: &Path, bytes: &[u8]) -> Result<()> {
     atomic_write(path, bytes)
+}
+
+pub fn print_status(action: impl AsRef<str>, detail: impl AsRef<str>) {
+    print_styled_status(action.as_ref(), detail.as_ref(), "1;32");
+}
+
+pub fn print_note(action: impl AsRef<str>, detail: impl AsRef<str>) {
+    print_styled_status(action.as_ref(), detail.as_ref(), "1;36");
+}
+
+pub fn print_warning(detail: impl AsRef<str>) {
+    print_styled_status("Warning", detail.as_ref(), "1;33");
+}
+
+pub fn print_error(detail: impl AsRef<str>) {
+    print_styled_status("Error", detail.as_ref(), "1;31");
+}
+
+fn print_styled_status(action: &str, detail: &str, color_code: &str) {
+    let mut stderr = io::stderr();
+    let label = format!("{action:>width$}", width = STATUS_LABEL_WIDTH);
+    let rendered = if stderr_supports_color() {
+        format!("\x1b[{color_code}m{label}\x1b[0m {detail}")
+    } else {
+        format!("{label} {detail}")
+    };
+    let _ = writeln!(stderr, "{rendered}");
+}
+
+fn stderr_supports_color() -> bool {
+    io::stderr().is_terminal()
+        && std::env::var_os("NO_COLOR").is_none()
+        && std::env::var("TERM")
+            .map(|term| !term.eq_ignore_ascii_case("dumb"))
+            .unwrap_or(true)
 }
 
 pub fn render_command(command: &Command) -> String {

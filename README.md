@@ -143,7 +143,7 @@ Supported target architectures:
 8. run `rpmbuild`
 9. collect RPM/SRPM artifacts into the output repo layout
 
-During `rgbs build`, concise stage progress is streamed to stderr so users can see which step is active while stdout remains reserved for the final JSON result.
+During `rgbs build`, concise cargo-style stage status lines are streamed to stderr so users can see which step is active while stdout remains reserved for the final JSON result.
 
 Each build also writes persistent logs under:
 
