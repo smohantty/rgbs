@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use rgbs_common::{
-    Result, RgbsError, atomic_write, cache_root, ensure_dir, path_to_string, render_command,
-    run_command, sha256_hex,
+    Result, RgbsError, atomic_write, cache_root, current_build_log_paths, ensure_dir,
+    log_debug_line, log_progress_line, path_to_string, render_command, run_command, sha256_hex,
 };
 use rgbs_config::ResolvedBuildPlan;
 use rgbs_repo::{
@@ -154,6 +154,15 @@ pub struct ArtifactSummary {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct BuildLogsSummary {
+    pub session_dir: String,
+    pub progress_log: String,
+    pub debug_log: String,
+    pub plan_json: String,
+    pub config_snapshot: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct PerformanceSummary {
     pub total_ms: u64,
     pub repository_ms: Option<u64>,
@@ -186,16 +195,39 @@ pub struct BuildOutcome {
     pub stage: StageSummary,
     pub runner: RunnerSummary,
     pub artifacts: ArtifactSummary,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub logs: Option<BuildLogsSummary>,
     pub warnings: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub performance: Option<PerformanceSummary>,
 }
 
+fn progress(message: impl AsRef<str>) {
+    let message = message.as_ref();
+    eprintln!("rgbs: {message}");
+    log_progress_line(message);
+}
+
+fn progress_warn(message: impl AsRef<str>) {
+    let message = message.as_ref();
+    eprintln!("rgbs: warning: {message}");
+    log_progress_line(format!("warning: {message}"));
+    log_debug_line(format!("warning: {message}"));
+}
+
 pub fn execute_build(plan: &ResolvedBuildPlan) -> Result<BuildOutcome> {
     let total_started = Instant::now();
     let cached_buildroot = if plan.noinit {
+        progress(format!(
+            "reusing cached buildroot state for --noinit [{}]",
+            plan.arch
+        ));
         Some(load_active_buildroot(plan)?)
     } else {
+        progress(format!(
+            "resolving repositories for profile {} [{}]",
+            plan.profile.name, plan.arch
+        ));
         None
     };
     let (repo_state, repository_ms) = if plan.noinit {
@@ -208,6 +240,15 @@ pub fn execute_build(plan: &ResolvedBuildPlan) -> Result<BuildOutcome> {
             explicit_buildconf: plan.buildconf.clone(),
             clean_cache: plan.clean_repos,
         })?;
+        progress(format!(
+            "repository metadata ready: {} packages{}",
+            state.package_count,
+            state
+                .buildconf
+                .as_deref()
+                .map(|path| format!(", buildconf {}", path))
+                .unwrap_or_default()
+        ));
         (Some(state), Some(duration_ms(started.elapsed())))
     };
     let buildconf_path = repo_state
@@ -220,6 +261,7 @@ pub fn execute_build(plan: &ResolvedBuildPlan) -> Result<BuildOutcome> {
             .and_then(|state| state.buildconf_path.as_ref().map(PathBuf::from))
     });
     let spec_started = Instant::now();
+    progress(format!("inspecting spec under {}", plan.packaging_dir));
     let spec = inspect_spec(&InspectRequest {
         git_dir: PathBuf::from(&plan.git_dir),
         packaging_dir: plan.packaging_dir.clone(),
@@ -227,6 +269,10 @@ pub fn execute_build(plan: &ResolvedBuildPlan) -> Result<BuildOutcome> {
         buildconf: buildconf_path.clone(),
         defines: plan.defines.clone(),
     })?;
+    progress(format!(
+        "selected spec {} ({}-{}-{})",
+        spec.spec_path, spec.name, spec.version, spec.release
+    ));
     let spec_ms = duration_ms(spec_started.elapsed());
 
     let (
@@ -241,8 +287,18 @@ pub fn execute_build(plan: &ResolvedBuildPlan) -> Result<BuildOutcome> {
         reused_package_downloads,
     ) = if let Some(repo_state) = repo_state.as_ref() {
         let dependency_started = Instant::now();
+        progress("resolving BuildRequires");
         let dependencies = resolve_build_dependencies(repo_state, &spec, &plan.arch)?;
         let dependency_ms = Some(duration_ms(dependency_started.elapsed()));
+        progress(format!(
+            "resolved {} dependency packages{}",
+            dependencies.selected.len(),
+            if dependencies.cache_hit {
+                " (cache hit)"
+            } else {
+                ""
+            }
+        ));
         if !dependencies.unresolved.is_empty() || !dependencies.problems.is_empty() {
             return Err(RgbsError::message(format!(
                 "dependency resolution failed: {}{}",
@@ -268,10 +324,20 @@ pub fn execute_build(plan: &ResolvedBuildPlan) -> Result<BuildOutcome> {
         }
 
         let download_started = Instant::now();
+        progress(format!(
+            "materializing {} RPMs into the download cache",
+            dependencies.selected.len()
+        ));
         let downloads = download_packages(&dependencies, repo_state)?;
         let download_ms = Some(duration_ms(download_started.elapsed()));
         let reused_package_downloads = downloads.iter().filter(|package| package.reused).count();
+        progress(format!(
+            "download cache ready: {} reused, {} fetched",
+            reused_package_downloads,
+            downloads.len().saturating_sub(reused_package_downloads)
+        ));
         let buildroot_started = Instant::now();
+        progress(format!("preparing buildroot under {}", plan.buildroot));
         let buildroot = prepare_buildroot(
             plan,
             repo_state,
@@ -279,6 +345,12 @@ pub fn execute_build(plan: &ResolvedBuildPlan) -> Result<BuildOutcome> {
             &downloads,
             buildconf_path.as_deref(),
         )?;
+        progress(format!(
+            "buildroot {} at {} ({} packages)",
+            if buildroot.reused { "reused" } else { "ready" },
+            buildroot.path,
+            buildroot.installed_packages
+        ));
         let buildroot_ms = Some(duration_ms(buildroot_started.elapsed()));
         let solver_cache_hit = Some(dependencies.cache_hit);
         (
@@ -299,6 +371,10 @@ pub fn execute_build(plan: &ResolvedBuildPlan) -> Result<BuildOutcome> {
             .map(buildroot_summary_from_state)
             .transpose()?
             .ok_or_else(|| RgbsError::message("missing cached buildroot state for --noinit"))?;
+        progress(format!(
+            "reused cached buildroot {} ({} packages)",
+            buildroot.path, buildroot.installed_packages
+        ));
         let buildroot_ms = Some(duration_ms(buildroot_started.elapsed()));
         (
             None,
@@ -320,7 +396,17 @@ pub fn execute_build(plan: &ResolvedBuildPlan) -> Result<BuildOutcome> {
     };
 
     let stage_started = Instant::now();
+    progress("staging sources");
     let stage = stage_sources(plan, &spec)?;
+    progress(format!(
+        "stage {} at {}",
+        if stage.summary.reused {
+            "reused"
+        } else {
+            "prepared"
+        },
+        stage.summary.topdir
+    ));
     let stage_ms = duration_ms(stage_started.elapsed());
     let rpmbuild_started = Instant::now();
     let runner = run_rpmbuild(
@@ -335,7 +421,14 @@ pub fn execute_build(plan: &ResolvedBuildPlan) -> Result<BuildOutcome> {
     warnings.extend(stage.warnings);
     warnings.extend(runner.warnings);
     let artifacts_started = Instant::now();
+    progress("collecting artifacts");
     let artifacts = collect_artifacts(plan, &stage.summary)?;
+    progress(format!(
+        "collected {} RPMs and {} SRPMs into {}",
+        artifacts.rpms.len(),
+        artifacts.srpms.len(),
+        artifacts.output_repo
+    ));
     let artifacts_ms = duration_ms(artifacts_started.elapsed());
     let performance = plan.perf.then(|| PerformanceSummary {
         total_ms: duration_ms(total_started.elapsed()),
@@ -356,6 +449,10 @@ pub fn execute_build(plan: &ResolvedBuildPlan) -> Result<BuildOutcome> {
         artifact_rpms: artifacts.rpms.len(),
         artifact_srpms: artifacts.srpms.len(),
     });
+    progress(format!(
+        "build complete in {} ms",
+        duration_ms(total_started.elapsed())
+    ));
 
     Ok(BuildOutcome {
         execution: "completed".to_string(),
@@ -368,6 +465,13 @@ pub fn execute_build(plan: &ResolvedBuildPlan) -> Result<BuildOutcome> {
         stage: stage.summary,
         runner: runner.summary,
         artifacts,
+        logs: current_build_log_paths().map(|paths| BuildLogsSummary {
+            session_dir: path_to_string(&paths.session_dir),
+            progress_log: path_to_string(&paths.progress_log),
+            debug_log: path_to_string(&paths.debug_log),
+            plan_json: path_to_string(&paths.plan_json),
+            config_snapshot: path_to_string(&paths.config_snapshot),
+        }),
         warnings,
         performance,
     })
@@ -772,6 +876,11 @@ fn install_packages_into_buildroot(root: &Path, packages: &[DownloadedPackage]) 
     if packages.is_empty() {
         return Ok(());
     }
+    progress(format!(
+        "installing {} packages into buildroot {}",
+        packages.len(),
+        root.display()
+    ));
 
     let mut install = Command::new("rpm");
     install
@@ -788,7 +897,14 @@ fn install_packages_into_buildroot(root: &Path, packages: &[DownloadedPackage]) 
     for package in packages {
         install.arg(&package.path);
     }
-    run_command(&mut install).map(|_| ())
+    run_command(&mut install).map(|_| ()).map_err(|err| {
+        RgbsError::message(format!(
+            "buildroot package install failed for {} while installing {} packages: {}",
+            root.display(),
+            packages.len(),
+            err
+        ))
+    })
 }
 
 fn query_installed_nevras(root: &Path) -> Result<HashSet<String>> {
@@ -1306,39 +1422,69 @@ fn run_rpmbuild(
     let mut warnings = Vec::new();
 
     if let Some(execution) = reuse_completed_build(plan, spec, stage, buildroot)? {
+        progress(format!(
+            "reusing previous rpmbuild outputs (log: {})",
+            execution.summary.log_path
+        ));
         return Ok(execution);
     }
 
     if let Some(root) = buildroot {
         if command_in_path("bwrap") {
             match plan_bwrap_runtime(root) {
-                Ok(runtime) => match run_bwrap_rpmbuild(
-                    plan,
-                    spec,
-                    buildconf,
-                    root,
-                    &runtime,
-                    &stage_root,
-                    &spec_path,
-                    &log_path,
-                ) {
-                    Ok(summary) => {
-                        save_build_stamp(&stage_root, spec, stage, buildroot, plan.skip_srcrpm)?;
-                        return Ok(RunnerExecution { summary, warnings });
+                Ok(runtime) => {
+                    progress(format!(
+                        "running rpmbuild with bwrap backend (log: {})",
+                        log_path.display()
+                    ));
+                    match run_bwrap_rpmbuild(
+                        plan,
+                        spec,
+                        buildconf,
+                        root,
+                        &runtime,
+                        &stage_root,
+                        &spec_path,
+                        &log_path,
+                    ) {
+                        Ok(summary) => {
+                            save_build_stamp(
+                                &stage_root,
+                                spec,
+                                stage,
+                                buildroot,
+                                plan.skip_srcrpm,
+                            )?;
+                            return Ok(RunnerExecution { summary, warnings });
+                        }
+                        Err(err) => {
+                            let message = format!(
+                                "bwrap backend failed, falling back to host rpmbuild: {err}"
+                            );
+                            progress_warn(&message);
+                            warnings.push(message);
+                        }
                     }
-                    Err(err) => warnings.push(format!(
-                        "bwrap backend failed, falling back to host rpmbuild: {err}"
-                    )),
-                },
-                Err(err) => warnings.push(format!(
-                    "bwrap backend unavailable for this buildroot, falling back to host rpmbuild: {err}"
-                )),
+                }
+                Err(err) => {
+                    let message = format!(
+                        "bwrap backend unavailable for this buildroot, falling back to host rpmbuild: {err}"
+                    );
+                    progress_warn(&message);
+                    warnings.push(message);
+                }
             }
         } else {
-            warnings.push("bubblewrap is not installed; using host rpmbuild".to_string());
+            let message = "bubblewrap is not installed; using host rpmbuild".to_string();
+            progress_warn(&message);
+            warnings.push(message);
         }
     }
 
+    progress(format!(
+        "running rpmbuild with host backend (log: {})",
+        log_path.display()
+    ));
     let summary = run_host_rpmbuild(plan, spec, buildconf, &stage_root, &spec_path, &log_path)?;
     save_build_stamp(&stage_root, spec, stage, buildroot, plan.skip_srcrpm)?;
     Ok(RunnerExecution { summary, warnings })

@@ -101,6 +101,15 @@ Compatibility target:
   - total wall time
   - per-stage timings
   - cache and reuse indicators
+- streamed stderr progress logs for build stages:
+  - config load
+  - repository/spec/dependency/download/buildroot/stage/rpmbuild/artifact progress
+  - fallback warnings for runner backend changes
+- persistent per-build log sessions under `GBS-ROOT/logs/<arch>/<session>/` with:
+  - `progress.log`
+  - `debug.log`
+  - `resolved-plan.json`
+  - `config-snapshot.conf`
 
 ## Remaining Before V1 Signoff
 

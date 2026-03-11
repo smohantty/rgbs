@@ -143,6 +143,21 @@ Supported target architectures:
 8. run `rpmbuild`
 9. collect RPM/SRPM artifacts into the output repo layout
 
+During `rgbs build`, concise stage progress is streamed to stderr so users can see which step is active while stdout remains reserved for the final JSON result.
+
+Each build also writes persistent logs under:
+
+```text
+<buildroot>/logs/<arch>/<session>/
+```
+
+Current log files:
+
+- `progress.log` for the same high-level stage progress shown to the user
+- `debug.log` for command traces and stderr/stdout from invoked tools
+- `resolved-plan.json` for the resolved build plan snapshot used for that run
+- `config-snapshot.conf` for a redacted merged dump of the relevant `gbs.conf` sections used for that run
+
 ## Spec Selection
 
 By default, `rgbs` looks for spec files under the resolved `packaging_dir` from `.gbs.conf`. The default packaging dir is `packaging`.
@@ -236,6 +251,8 @@ The build command prints JSON describing the completed build. When `--perf` is e
 - total wall time
 - repository, spec, solver, download, buildroot, staging, `rpmbuild`, and artifact timings
 - cache and reuse indicators
+
+When available, the JSON also includes a `logs` section pointing at the per-build log directory and files under the configured buildroot.
 
 ## Notes
 

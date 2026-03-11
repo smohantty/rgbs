@@ -7,8 +7,9 @@ use std::process::Command;
 use clap::{ArgAction, Parser, Subcommand};
 use rgbs_builder::execute_build;
 use rgbs_common::{
-    Result, RgbsError, canonicalize_target_arch, normalize_arch, path_to_string, render_command,
-    supported_target_arch_list,
+    Result, RgbsError, canonicalize_target_arch, clear_build_logger, init_build_logger,
+    log_progress_line, normalize_arch, path_to_string, render_command, supported_target_arch_list,
+    write_debug_file,
 };
 use rgbs_config::{BuildRequest, LoadOptions, load};
 
@@ -173,6 +174,14 @@ fn run() -> Result<()> {
 }
 
 fn run_build(config: Option<PathBuf>, args: BuildArgs) -> Result<()> {
+    if let Some(path) = config.as_ref() {
+        eprintln!(
+            "rgbs: loading config layers with explicit file {}",
+            path.display()
+        );
+    } else {
+        eprintln!("rgbs: loading config layers");
+    }
     let mut options = LoadOptions::discover(config)?;
     let git_dir = resolve_build_git_dir(&options.cwd, args.gitdir)?;
     options.cwd = git_dir.clone();
@@ -196,7 +205,56 @@ fn run_build(config: Option<PathBuf>, args: BuildArgs) -> Result<()> {
         skip_srcrpm: args.skip_srcrpm,
         perf: args.perf,
     })?;
-    let outcome = execute_build(&plan)?;
+    eprintln!(
+        "rgbs: build plan ready for {} [{}]",
+        plan.git_dir, plan.arch
+    );
+    let label = Path::new(&plan.git_dir)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("build");
+    let log_paths = init_build_logger(Path::new(&plan.buildroot), &plan.arch, label)?;
+    eprintln!(
+        "rgbs: logs will be written under {}",
+        log_paths.session_dir.display()
+    );
+    let plan_bytes = serde_json::to_vec_pretty(&plan)
+        .map_err(|err| RgbsError::message(format!("serialize resolved plan for logs: {err}")))?;
+    if let Err(err) = write_debug_file(&log_paths.plan_json, &plan_bytes) {
+        clear_build_logger();
+        return Err(err);
+    }
+    let config_snapshot = match config.render_debug_config_snapshot(&plan) {
+        Ok(snapshot) => snapshot,
+        Err(err) => {
+            clear_build_logger();
+            return Err(err);
+        }
+    };
+    if let Err(err) = write_debug_file(&log_paths.config_snapshot, config_snapshot.as_bytes()) {
+        clear_build_logger();
+        return Err(err);
+    }
+    log_progress_line(format!(
+        "build plan ready for {} [{}]",
+        plan.git_dir, plan.arch
+    ));
+    let outcome = match execute_build(&plan) {
+        Ok(outcome) => outcome,
+        Err(err) => {
+            eprintln!(
+                "rgbs: build logs saved under {}",
+                log_paths.session_dir.display()
+            );
+            clear_build_logger();
+            return Err(err);
+        }
+    };
+    eprintln!(
+        "rgbs: build logs saved under {}",
+        log_paths.session_dir.display()
+    );
+    clear_build_logger();
 
     println!("{}", serde_json::to_string_pretty(&outcome).unwrap());
     Ok(())

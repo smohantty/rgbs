@@ -3,12 +3,30 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::{Mutex, OnceLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 pub type Result<T> = std::result::Result<T, RgbsError>;
 pub const SUPPORTED_TARGET_ARCHES: [&str; 2] = ["armv7l", "aarch64"];
+
+#[derive(Debug, Clone)]
+pub struct BuildLogPaths {
+    pub session_dir: PathBuf,
+    pub progress_log: PathBuf,
+    pub debug_log: PathBuf,
+    pub plan_json: PathBuf,
+    pub config_snapshot: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+struct BuildLogger {
+    paths: BuildLogPaths,
+}
+
+static BUILD_LOGGER: OnceLock<Mutex<Option<BuildLogger>>> = OnceLock::new();
 
 #[derive(Debug, Error)]
 pub enum RgbsError {
@@ -135,6 +153,68 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
+pub fn init_build_logger(buildroot: &Path, arch: &str, label: &str) -> Result<BuildLogPaths> {
+    let session = format!(
+        "{}-{}-{}",
+        timestamp_millis(),
+        std::process::id(),
+        sanitize_label(label)
+    );
+    let session_dir = buildroot.join("logs").join(arch).join(session);
+    ensure_dir(&session_dir)?;
+    let paths = BuildLogPaths {
+        session_dir: session_dir.clone(),
+        progress_log: session_dir.join("progress.log"),
+        debug_log: session_dir.join("debug.log"),
+        plan_json: session_dir.join("resolved-plan.json"),
+        config_snapshot: session_dir.join("config-snapshot.conf"),
+    };
+
+    append_log_line(&paths.progress_log, "build log initialized")?;
+    append_log_line(&paths.debug_log, "build debug log initialized")?;
+
+    let state = BUILD_LOGGER.get_or_init(|| Mutex::new(None));
+    let mut guard = state
+        .lock()
+        .map_err(|_| RgbsError::message("build logger mutex poisoned"))?;
+    *guard = Some(BuildLogger {
+        paths: paths.clone(),
+    });
+    Ok(paths)
+}
+
+pub fn clear_build_logger() {
+    if let Some(state) = BUILD_LOGGER.get() {
+        if let Ok(mut guard) = state.lock() {
+            *guard = None;
+        }
+    }
+}
+
+pub fn current_build_log_paths() -> Option<BuildLogPaths> {
+    let state = BUILD_LOGGER.get()?;
+    let guard = state.lock().ok()?;
+    guard.as_ref().map(|logger| logger.paths.clone())
+}
+
+pub fn log_progress_line(message: impl AsRef<str>) {
+    let message = message.as_ref();
+    if let Some(paths) = current_build_log_paths() {
+        let _ = append_log_line(&paths.progress_log, message);
+        let _ = append_log_line(&paths.debug_log, message);
+    }
+}
+
+pub fn log_debug_line(message: impl AsRef<str>) {
+    if let Some(paths) = current_build_log_paths() {
+        let _ = append_log_line(&paths.debug_log, message.as_ref());
+    }
+}
+
+pub fn write_debug_file(path: &Path, bytes: &[u8]) -> Result<()> {
+    atomic_write(path, bytes)
+}
+
 pub fn render_command(command: &Command) -> String {
     let program = command.get_program().to_string_lossy();
     let args = command
@@ -150,13 +230,16 @@ pub fn render_command(command: &Command) -> String {
 
 pub fn run_command(command: &mut Command) -> Result<Output> {
     let rendered = render_command(command);
+    log_debug_line(format!("run: {rendered}"));
     let output = command
         .output()
         .map_err(|err| RgbsError::command(&rendered, err.to_string()))?;
     if output.status.success() {
+        log_command_output(&rendered, &output);
         return Ok(output);
     }
 
+    log_command_output(&rendered, &output);
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let message = if stderr.is_empty() {
@@ -180,6 +263,51 @@ fn shell_escape(value: &str) -> String {
     }
 
     format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn append_log_line(path: &Path, message: &str) -> Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| RgbsError::message(format!("path has no parent: {}", path.display())))?;
+    ensure_dir(parent)?;
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|err| RgbsError::io(path, err))?;
+    writeln!(file, "[{}] {}", timestamp_millis(), message).map_err(|err| RgbsError::io(path, err))
+}
+
+fn sanitize_label(label: &str) -> String {
+    label
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn timestamp_millis() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+}
+
+fn log_command_output(rendered: &str, output: &Output) {
+    log_debug_line(format!("exit: {rendered} -> {}", output.status));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !stdout.trim().is_empty() {
+        log_debug_line(format!("stdout for `{rendered}`:\n{}", stdout.trim_end()));
+    }
+    if !stderr.trim().is_empty() {
+        log_debug_line(format!("stderr for `{rendered}`:\n{}", stderr.trim_end()));
+    }
 }
 
 #[cfg(test)]

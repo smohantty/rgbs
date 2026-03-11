@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashSet};
+use std::fmt::Write as _;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -218,6 +219,52 @@ pub fn load(options: &LoadOptions) -> Result<Config> {
 impl Config {
     pub fn config_files(&self) -> Vec<PathBuf> {
         self.layers.iter().map(|layer| layer.path.clone()).collect()
+    }
+
+    pub fn render_debug_config_snapshot(&self, plan: &ResolvedBuildPlan) -> Result<String> {
+        let mut out = String::new();
+        writeln!(&mut out, "# rgbs merged debug config snapshot").unwrap();
+        if !self.layers.is_empty() {
+            writeln!(&mut out, "# config files in priority order:").unwrap();
+            for path in self.config_files() {
+                writeln!(&mut out, "# - {}", path.display()).unwrap();
+            }
+        }
+        writeln!(&mut out).unwrap();
+
+        write_snapshot_section(&mut out, "general", &self.snapshot_general_entries(plan)?)?;
+
+        match plan.profile.kind {
+            ProfileKind::Profile => {
+                write_snapshot_section(
+                    &mut out,
+                    &plan.profile.name,
+                    &self.snapshot_profile_entries(&plan.profile),
+                )?;
+                for repo in &plan.profile.repos {
+                    write_snapshot_section(&mut out, &repo.name, &snapshot_repo_entries(repo))?;
+                }
+                if let Some(obs) = &plan.profile.obs {
+                    write_snapshot_section(&mut out, &obs.name, &snapshot_obs_entries(obs))?;
+                }
+            }
+            ProfileKind::LegacyBuildSections => {
+                write_snapshot_section(
+                    &mut out,
+                    "build",
+                    &snapshot_legacy_build_entries(&plan.profile.repos),
+                )?;
+                if let Some(obs) = &plan.profile.obs {
+                    write_snapshot_section(
+                        &mut out,
+                        "remotebuild",
+                        &snapshot_legacy_remote_build_entries(obs),
+                    )?;
+                }
+            }
+        }
+
+        Ok(out)
     }
 
     pub fn resolve_build_plan(&self, request: &BuildRequest) -> Result<ResolvedBuildPlan> {
@@ -589,6 +636,154 @@ impl Config {
             .any(|layer| layer.doc.has_section(section))
             || default_section(section).is_some()
     }
+
+    fn snapshot_general_entries(&self, plan: &ResolvedBuildPlan) -> Result<Vec<(String, String)>> {
+        let mut entries = Vec::new();
+        if matches!(plan.profile.kind, ProfileKind::Profile)
+            || self.merged_get_raw("general", "profile").is_some()
+        {
+            entries.push(("profile".to_string(), plan.profile.name.clone()));
+        }
+        entries.push((
+            "tmpdir".to_string(),
+            self.general_value("tmpdir", DEFAULT_TMPDIR)?,
+        ));
+        entries.push(("buildroot".to_string(), plan.buildroot.clone()));
+        entries.push(("packaging_dir".to_string(), plan.packaging_dir.clone()));
+        entries.push(("work_dir".to_string(), plan.work_dir.clone()));
+        if let Some(user) = self.section_user("general")? {
+            entries.push(("user".to_string(), user));
+        }
+        if self.section_password("general")?.is_some() {
+            entries.push(("passwd".to_string(), "******".to_string()));
+        }
+        Ok(entries)
+    }
+
+    fn snapshot_profile_entries(&self, profile: &ResolvedProfile) -> Vec<(String, String)> {
+        let mut entries = Vec::new();
+        if !profile.repos.is_empty() {
+            entries.push((
+                "repos".to_string(),
+                profile
+                    .repos
+                    .iter()
+                    .map(|repo| repo.name.clone())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ));
+        }
+        if let Some(obs) = &profile.obs {
+            entries.push(("obs".to_string(), obs.name.clone()));
+        }
+        if let Some(buildroot) = &profile.buildroot {
+            entries.push(("buildroot".to_string(), buildroot.clone()));
+        }
+        if let Some(buildconf) = &profile.buildconf {
+            entries.push(("buildconf".to_string(), buildconf.clone()));
+        }
+        if !profile.exclude_packages.is_empty() {
+            entries.push((
+                "exclude_packages".to_string(),
+                profile.exclude_packages.join(", "),
+            ));
+        }
+        if let Some(source) = &profile.source {
+            entries.push(("source".to_string(), source.clone()));
+        }
+        if let Some(depends) = &profile.depends {
+            entries.push(("depends".to_string(), depends.clone()));
+        }
+        if let Some(pkgs) = &profile.pkgs {
+            entries.push(("pkgs".to_string(), pkgs.clone()));
+        }
+        if let Some(user) = &profile.common_user {
+            entries.push(("user".to_string(), user.clone()));
+        }
+        if profile.common_password.is_some() {
+            entries.push(("passwd".to_string(), "******".to_string()));
+        }
+        entries
+    }
+}
+
+fn snapshot_repo_entries(repo: &ResolvedRepo) -> Vec<(String, String)> {
+    let mut entries = vec![("url".to_string(), repo.location.clone())];
+    if let Some(user) = &repo.user {
+        entries.push(("user".to_string(), user.clone()));
+    }
+    if repo.password.is_some() {
+        entries.push(("passwd".to_string(), "******".to_string()));
+    }
+    entries
+}
+
+fn snapshot_obs_entries(obs: &ResolvedObs) -> Vec<(String, String)> {
+    let mut entries = vec![("url".to_string(), obs.location.clone())];
+    if let Some(user) = &obs.user {
+        entries.push(("user".to_string(), user.clone()));
+    }
+    if obs.password.is_some() {
+        entries.push(("passwd".to_string(), "******".to_string()));
+    }
+    if let Some(base_project) = &obs.base_project {
+        entries.push(("base_prj".to_string(), base_project.clone()));
+    }
+    if let Some(target_project) = &obs.target_project {
+        entries.push(("target_prj".to_string(), target_project.clone()));
+    }
+    entries
+}
+
+fn snapshot_legacy_build_entries(repos: &[ResolvedRepo]) -> Vec<(String, String)> {
+    let mut entries = Vec::new();
+    for repo in repos {
+        let key = repo.name.strip_prefix("repo.").unwrap_or(&repo.name);
+        entries.push((format!("{key}.url"), repo.location.clone()));
+        if let Some(user) = &repo.user {
+            entries.push((format!("{key}.user"), user.clone()));
+        }
+        if repo.password.is_some() {
+            entries.push((format!("{key}.passwd"), "******".to_string()));
+        }
+    }
+    entries
+}
+
+fn snapshot_legacy_remote_build_entries(obs: &ResolvedObs) -> Vec<(String, String)> {
+    let mut entries = vec![("build_server".to_string(), obs.location.clone())];
+    if let Some(user) = &obs.user {
+        entries.push(("user".to_string(), user.clone()));
+    }
+    if obs.password.is_some() {
+        entries.push(("passwd".to_string(), "******".to_string()));
+    }
+    if let Some(base_project) = &obs.base_project {
+        entries.push(("base_prj".to_string(), base_project.clone()));
+    }
+    if let Some(target_project) = &obs.target_project {
+        entries.push(("target_prj".to_string(), target_project.clone()));
+    }
+    entries
+}
+
+fn write_snapshot_section(
+    out: &mut String,
+    section: &str,
+    entries: &[(String, String)],
+) -> Result<()> {
+    if entries.is_empty() {
+        return Ok(());
+    }
+    writeln!(out, "[{section}]")
+        .map_err(|err| RgbsError::message(format!("render config snapshot section: {err}")))?;
+    for (key, value) in entries {
+        writeln!(out, "{key} = {value}")
+            .map_err(|err| RgbsError::message(format!("render config snapshot entry: {err}")))?;
+    }
+    writeln!(out)
+        .map_err(|err| RgbsError::message(format!("render config snapshot spacing: {err}")))?;
+    Ok(())
 }
 
 fn default_section(section: &str) -> Option<IndexMap<String, String>> {
@@ -1090,6 +1285,120 @@ buildconf = ${work_dir}/build.conf
         let expected_buildconf = path_to_string(&harness.cwd.join("build.conf"));
         assert_eq!(plan.buildconf.as_deref(), Some(expected_buildconf.as_str()));
         assert!(plan.perf);
+    }
+
+    #[test]
+    fn renders_redacted_profile_config_snapshot() {
+        let fixture = format!(
+            r#"
+[general]
+profile = profile.demo
+user = Alice
+passwdx = {PASSWDX_SECRET}
+
+[profile.demo]
+repos = repo.demo
+obs = obs.demo
+buildconf = ${{work_dir}}/build.conf
+
+[repo.demo]
+url = https://repo/demo
+
+[obs.demo]
+url = https://api/demo
+target_prj = DemoTarget
+"#
+        );
+        let harness = TestHarness::new();
+        harness.write_home(&fixture);
+
+        let config = load(&harness.options()).unwrap();
+        let plan = config
+            .resolve_build_plan(&BuildRequest {
+                git_dir: harness.cwd.clone(),
+                arch: "aarch64".to_string(),
+                profile: None,
+                repositories: Vec::new(),
+                dist: None,
+                buildroot: None,
+                defines: Vec::new(),
+                spec: None,
+                include_all: false,
+                noinit: false,
+                clean: false,
+                keep_packs: false,
+                overwrite: false,
+                fail_fast: false,
+                clean_repos: false,
+                skip_srcrpm: false,
+                perf: false,
+            })
+            .unwrap();
+        let snapshot = config.render_debug_config_snapshot(&plan).unwrap();
+
+        assert!(snapshot.contains("[general]"));
+        assert!(snapshot.contains("profile = profile.demo"));
+        assert!(snapshot.contains("passwd = ******"));
+        assert!(snapshot.contains("[profile.demo]"));
+        assert!(snapshot.contains("repos = repo.demo"));
+        assert!(snapshot.contains("[repo.demo]"));
+        assert!(snapshot.contains("url = https://Alice:******@repo/demo"));
+        assert!(snapshot.contains("[obs.demo]"));
+        assert!(snapshot.contains("target_prj = DemoTarget"));
+        assert!(!snapshot.contains("secret"));
+    }
+
+    #[test]
+    fn renders_redacted_legacy_config_snapshot() {
+        let fixture = format!(
+            r#"
+[remotebuild]
+build_server = https://api/build/server
+user = Alice
+passwdx = {PASSWDX_SECRET}
+base_prj = Main
+
+[build]
+repo1.url = https://repo1/path
+repo1.user = Alice
+repo1.passwdx = {PASSWDX_SECRET}
+repo2.url = /local/path/repo
+"#
+        );
+        let harness = TestHarness::new();
+        harness.write_home(&fixture);
+
+        let config = load(&harness.options()).unwrap();
+        let plan = config
+            .resolve_build_plan(&BuildRequest {
+                git_dir: harness.cwd.clone(),
+                arch: "armv7l".to_string(),
+                profile: None,
+                repositories: Vec::new(),
+                dist: None,
+                buildroot: None,
+                defines: Vec::new(),
+                spec: None,
+                include_all: false,
+                noinit: false,
+                clean: false,
+                keep_packs: false,
+                overwrite: false,
+                fail_fast: false,
+                clean_repos: false,
+                skip_srcrpm: false,
+                perf: false,
+            })
+            .unwrap();
+        let snapshot = config.render_debug_config_snapshot(&plan).unwrap();
+
+        assert!(snapshot.contains("[build]"));
+        assert!(snapshot.contains("repo1.url = https://Alice:******@repo1/path"));
+        assert!(snapshot.contains("repo1.passwd = ******"));
+        assert!(snapshot.contains("[remotebuild]"));
+        assert!(snapshot.contains("build_server = https://Alice:******@api/build/server"));
+        assert!(snapshot.contains("base_prj = Main"));
+        assert!(!snapshot.contains("secret"));
     }
 
     #[test]
