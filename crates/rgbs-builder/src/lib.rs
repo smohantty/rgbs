@@ -3,7 +3,7 @@ use std::env;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use base64::Engine;
@@ -922,6 +922,33 @@ fn install_packages_into_buildroot(root: &Path, packages: &[DownloadedPackage]) 
         ),
     );
 
+    if !command_in_path("rpm2cpio") {
+        return Err(RgbsError::message(
+            "buildroot package install requires `rpm2cpio`; run `rgbs doctor` and `rgbs fix` on Ubuntu to install it",
+        ));
+    }
+    if !command_in_path("cpio") {
+        return Err(RgbsError::message(
+            "buildroot package install requires `cpio`; run `rgbs doctor` and `rgbs fix` on Ubuntu to install it",
+        ));
+    }
+
+    register_packages_in_rpmdb(root, packages)?;
+    for package in packages {
+        extract_package_payload(root, package).map_err(|err| {
+            RgbsError::message(format!(
+                "buildroot package install failed for {} while extracting {} ({}): {}",
+                root.display(),
+                package.nevra,
+                package.path,
+                err
+            ))
+        })?;
+    }
+    Ok(())
+}
+
+fn register_packages_in_rpmdb(root: &Path, packages: &[DownloadedPackage]) -> Result<()> {
     let mut install = Command::new("rpm");
     install
         .arg("--root")
@@ -929,6 +956,7 @@ fn install_packages_into_buildroot(root: &Path, packages: &[DownloadedPackage]) 
         .arg("--dbpath")
         .arg("/var/lib/rpm")
         .arg("-ivh")
+        .arg("--justdb")
         .arg("--nodeps")
         .arg("--nosignature")
         .arg("--notriggers")
@@ -939,12 +967,113 @@ fn install_packages_into_buildroot(root: &Path, packages: &[DownloadedPackage]) 
     }
     run_command(&mut install).map(|_| ()).map_err(|err| {
         RgbsError::message(format!(
-            "buildroot package install failed for {} while installing {} packages: {}",
-            root.display(),
+            "failed to register {} packages in rpmdb for {}: {}",
             packages.len(),
+            root.display(),
             err
         ))
     })
+}
+
+fn extract_package_payload(root: &Path, package: &DownloadedPackage) -> Result<()> {
+    log_debug_line(format!(
+        "extracting package payload for {} from {}",
+        package.nevra, package.path
+    ));
+
+    let mut rpm2cpio = Command::new("rpm2cpio");
+    rpm2cpio
+        .arg(&package.path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let rendered_rpm2cpio = render_command(&rpm2cpio);
+    log_debug_line(format!("run: {rendered_rpm2cpio}"));
+    let mut rpm2cpio_child = rpm2cpio
+        .spawn()
+        .map_err(|err| RgbsError::command(&rendered_rpm2cpio, err.to_string()))?;
+    let rpm2cpio_stdout = rpm2cpio_child.stdout.take().ok_or_else(|| {
+        RgbsError::message(format!(
+            "failed to capture stdout for payload extraction command: {rendered_rpm2cpio}"
+        ))
+    })?;
+
+    let mut cpio = Command::new("cpio");
+    cpio.current_dir(root)
+        .arg("-idm")
+        .arg("-u")
+        .arg("--quiet")
+        .arg("--no-absolute-filenames")
+        .arg("--preserve-modification-time")
+        .arg("--no-preserve-owner")
+        .stdin(Stdio::from(rpm2cpio_stdout))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let rendered_cpio = format!("(cd {} && {})", root.display(), render_command(&cpio));
+    log_debug_line(format!("run: {rendered_cpio}"));
+    let cpio_output = cpio
+        .output()
+        .map_err(|err| RgbsError::command(&rendered_cpio, err.to_string()))?;
+    let rpm2cpio_output = rpm2cpio_child
+        .wait_with_output()
+        .map_err(|err| RgbsError::command(&rendered_rpm2cpio, err.to_string()))?;
+
+    log_debug_line(format!(
+        "exit: {rendered_rpm2cpio} -> {}",
+        rpm2cpio_output.status
+    ));
+    let rpm2cpio_stdout_text = String::from_utf8_lossy(&rpm2cpio_output.stdout);
+    let rpm2cpio_stderr_text = String::from_utf8_lossy(&rpm2cpio_output.stderr);
+    if !rpm2cpio_stdout_text.trim().is_empty() {
+        log_debug_line(format!(
+            "stdout for `{rendered_rpm2cpio}`:\n{}",
+            rpm2cpio_stdout_text.trim_end()
+        ));
+    }
+    if !rpm2cpio_stderr_text.trim().is_empty() {
+        log_debug_line(format!(
+            "stderr for `{rendered_rpm2cpio}`:\n{}",
+            rpm2cpio_stderr_text.trim_end()
+        ));
+    }
+
+    log_debug_line(format!("exit: {rendered_cpio} -> {}", cpio_output.status));
+    let cpio_stdout_text = String::from_utf8_lossy(&cpio_output.stdout);
+    let cpio_stderr_text = String::from_utf8_lossy(&cpio_output.stderr);
+    if !cpio_stdout_text.trim().is_empty() {
+        log_debug_line(format!(
+            "stdout for `{rendered_cpio}`:\n{}",
+            cpio_stdout_text.trim_end()
+        ));
+    }
+    if !cpio_stderr_text.trim().is_empty() {
+        log_debug_line(format!(
+            "stderr for `{rendered_cpio}`:\n{}",
+            cpio_stderr_text.trim_end()
+        ));
+    }
+
+    if !rpm2cpio_output.status.success() {
+        return Err(RgbsError::command(
+            rendered_rpm2cpio,
+            if rpm2cpio_stderr_text.trim().is_empty() {
+                format!("exit status {}", rpm2cpio_output.status)
+            } else {
+                rpm2cpio_stderr_text.trim().to_string()
+            },
+        ));
+    }
+    if !cpio_output.status.success() {
+        return Err(RgbsError::command(
+            rendered_cpio,
+            if cpio_stderr_text.trim().is_empty() {
+                format!("exit status {}", cpio_output.status)
+            } else {
+                cpio_stderr_text.trim().to_string()
+            },
+        ));
+    }
+
+    Ok(())
 }
 
 fn query_installed_nevras(root: &Path) -> Result<HashSet<String>> {

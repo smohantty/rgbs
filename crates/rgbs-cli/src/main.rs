@@ -357,8 +357,30 @@ fn collect_doctor_report(target_arch: Option<&str>) -> DoctorReport {
         true,
         InstallClass::RuntimeRequired,
         &["rpm"],
-        "required for rpmdb initialization and buildroot package installation",
+        "required for rpmdb initialization and package metadata registration",
         "install the RPM tooling package that provides `rpm`",
+    );
+    push_command_check(
+        &mut checks,
+        "Required for `rgbs build`",
+        "rpm2cpio",
+        &["rpm2cpio"],
+        true,
+        InstallClass::RuntimeRequired,
+        &["rpm"],
+        "required for unpacking RPM payloads into the prepared buildroot",
+        "install the RPM tooling package that provides `rpm2cpio`",
+    );
+    push_command_check(
+        &mut checks,
+        "Required for `rgbs build`",
+        "cpio",
+        &["cpio"],
+        true,
+        InstallClass::RuntimeRequired,
+        &["cpio"],
+        "required for unpacking RPM payloads into the prepared buildroot without preserving host-incompatible ownership",
+        "install the package that provides `cpio`",
     );
     push_command_check(
         &mut checks,
