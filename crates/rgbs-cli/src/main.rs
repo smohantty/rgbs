@@ -224,6 +224,8 @@ fn run_build(config: Option<PathBuf>, args: BuildArgs) -> Result<()> {
             log_paths.session_dir.display()
         ),
     );
+    let build_identity = binary_identity();
+    print_note("Binary", &build_identity);
     let plan_bytes = serde_json::to_vec_pretty(&plan)
         .map_err(|err| RgbsError::message(format!("serialize resolved plan for logs: {err}")))?;
     if let Err(err) = write_debug_file(&log_paths.plan_json, &plan_bytes) {
@@ -245,6 +247,7 @@ fn run_build(config: Option<PathBuf>, args: BuildArgs) -> Result<()> {
         "build plan ready for {} [{}]",
         plan.git_dir, plan.arch
     ));
+    log_progress_line(format!("binary {build_identity}"));
     let outcome = match execute_build(&plan) {
         Ok(outcome) => outcome,
         Err(err) => {
@@ -271,6 +274,15 @@ fn resolve_build_git_dir(cwd: &Path, gitdir: Option<PathBuf>) -> Result<PathBuf>
         Some(path) if path.is_absolute() => Ok(path),
         Some(path) => Ok(cwd.join(path)),
         None => Ok(cwd.to_path_buf()),
+    }
+}
+
+fn binary_identity() -> String {
+    let git_sha = option_env!("RGBS_GIT_SHA").unwrap_or("unknown");
+    if git_sha == "unknown" {
+        format!("rgbs {}", env!("CARGO_PKG_VERSION"))
+    } else {
+        format!("rgbs {} ({git_sha})", env!("CARGO_PKG_VERSION"))
     }
 }
 
