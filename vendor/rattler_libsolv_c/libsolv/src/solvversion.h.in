@@ -1,0 +1,62 @@
+/*
+ * Copyright (c) 2016, SUSE LLC
+ *
+ * This program is licensed under the BSD license, read LICENSE.BSD
+ * for further information
+ */
+
+/*
+ * solvversion.h
+ * 
+ */
+
+#ifndef LIBSOLV_SOLVVERSION_H
+#define LIBSOLV_SOLVVERSION_H
+
+#define LIBSOLV_VERSION_STRING "@VERSION@"
+#define LIBSOLV_VERSION_MAJOR @LIBSOLV_MAJOR@
+#define LIBSOLV_VERSION_MINOR @LIBSOLV_MINOR@
+#define LIBSOLV_VERSION_PATCH @LIBSOLV_PATCH@
+#define LIBSOLV_VERSION (LIBSOLV_VERSION_MAJOR * 10000 + LIBSOLV_VERSION_MINOR * 100 + LIBSOLV_VERSION_PATCH)
+
+#ifdef _WIN32
+// include win32/config.h for SOLV_API
+#include "config.h"
+#else
+#define SOLV_API
+#endif
+
+SOLV_API extern const char solv_version[];
+SOLV_API extern int solv_version_major;
+SOLV_API extern int solv_version_minor;
+SOLV_API extern int solv_version_patch;
+SOLV_API extern const char solv_toolversion[];
+
+#cmakedefine LIBSOLV_FEATURE_LINKED_PKGS
+#cmakedefine LIBSOLV_FEATURE_COMPLEX_DEPS
+#cmakedefine LIBSOLV_FEATURE_MULTI_SEMANTICS
+#cmakedefine LIBSOLV_FEATURE_CONDA
+
+#cmakedefine LIBSOLVEXT_FEATURE_RPMPKG
+#cmakedefine LIBSOLVEXT_FEATURE_RPMDB
+#cmakedefine LIBSOLVEXT_FEATURE_RPMDB_BYRPMHEADER
+#cmakedefine LIBSOLVEXT_FEATURE_PUBKEY
+#cmakedefine LIBSOLVEXT_FEATURE_RPMMD
+#cmakedefine LIBSOLVEXT_FEATURE_SUSEREPO
+#cmakedefine LIBSOLVEXT_FEATURE_COMPS
+#cmakedefine LIBSOLVEXT_FEATURE_HELIXREPO
+#cmakedefine LIBSOLVEXT_FEATURE_DEBIAN
+#cmakedefine LIBSOLVEXT_FEATURE_ARCHREPO
+#cmakedefine LIBSOLVEXT_FEATURE_HAIKU
+#cmakedefine LIBSOLVEXT_FEATURE_APPDATA
+#cmakedefine LIBSOLVEXT_FEATURE_APK
+#cmakedefine LIBSOLVEXT_FEATURE_ZLIB_COMPRESSION
+#cmakedefine LIBSOLVEXT_FEATURE_LZMA_COMPRESSION
+#cmakedefine LIBSOLVEXT_FEATURE_BZIP2_COMPRESSION
+#cmakedefine LIBSOLVEXT_FEATURE_ZSTD_COMPRESSION
+#cmakedefine LIBSOLVEXT_FEATURE_ZCHUNK_COMPRESSION
+
+/* see tools/common_write.c for toolversion history */
+#define LIBSOLV_TOOLVERSION "1.2"
+
+#endif

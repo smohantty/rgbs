@@ -1,0 +1,9 @@
+libdir=@CMAKE_INSTALL_FULL_LIBDIR@
+includedir=@CMAKE_INSTALL_FULL_INCLUDEDIR@
+
+Name: libsolvext
+Description: Library for reading repositories
+Version: @VERSION@
+Requires: libsolv
+Libs: -L${libdir} -lsolvext
+Cflags: -I${includedir}

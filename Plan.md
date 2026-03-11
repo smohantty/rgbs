@@ -117,6 +117,29 @@ V1 is successful when it:
 4. reaches at least comparable cold-build performance once parity is in place
 5. delivers measurably faster warm builds through metadata, solver, and buildroot reuse
 
+## Current Status
+
+Implemented in tree:
+
+- [x] `.gbs.conf` parsing, profile/repo/buildconf resolution, and CLI flag plumbing for local builds
+- [x] repo metadata fetch/cache, `build.conf` materialization, and legacy `build.xml` compatibility handling
+- [x] spec discovery, evaluated BuildRequires inspection, and `libsolv`-only dependency resolution with persistent solver caching
+- [x] RPM download caching, exact-match buildroot reuse, and shared `--keep-packs` buildroot accumulation
+- [x] persisted buildroot state for `--noinit`, including reuse of the cached buildroot path and cached `build.conf`
+- [x] source/spec staging with committed-tree export by default and working-tree export for `--include-all`
+- [x] `rpmbuild` execution through host or `bwrap`, artifact collection, and `--overwrite`-aware build skipping via persisted build stamps
+- [x] optional per-build performance reporting via `--perf` / `--time`, covering stage timings and cache/reuse stats
+
+Remaining before v1 signoff:
+
+- [ ] benchmark harness against old GBS local builds
+- [ ] fixture-driven artifact parity comparisons for representative packages and architectures
+- [ ] reduce dependence on host runtime bootstrap by making the prepared root more self-contained for the `bwrap` path
+
+Explicitly deferred past v1:
+
+- [ ] exact old-GBS `--incremental` semantics
+
 ## User-Facing Command Model
 
 V1 should support a command surface close to:
@@ -128,6 +151,7 @@ rgbs build [GITDIR] -A <arch> -R <repo>
 rgbs build [GITDIR] -A <arch> -D <build.conf>
 rgbs build [GITDIR] -A <arch> --include-all
 rgbs build [GITDIR] -A <arch> --noinit
+rgbs build [GITDIR] -A <arch> --perf
 ```
 
 Priority flags to preserve in v1:
@@ -179,6 +203,14 @@ Reason:
 - correctness matters more than hand-rolled cleverness here
 - it is the right class of tool for RPM dependency solving
 - it enables caching of solver inputs and outputs
+
+Implementation note:
+
+- use a bundled Rust crate integration so `rgbs` does not depend on a preinstalled system `libsolv`
+- standardize on `libsolv` as the only dependency solver path; do not keep a parallel in-tree Rust fallback solver
+- if the chosen crate misses a needed RPM symbol, add a thin local FFI shim rather than reintroducing custom resolution logic
+- if the upstream crate bundles `libsolv` but does not compile rpm-md support, vendor and patch the crate build so the RPM path is reproducible inside this repository
+- persist solver results keyed by exact repo fingerprint, arch, and evaluated BuildRequires so warm runs can skip both resolution and diagnostic recomputation
 
 ### 4. Reuse only on exact fingerprint match
 
@@ -574,6 +606,7 @@ Deliverables:
 - spec discovery
 - `rpmspec`/librpm-backed evaluated BuildRequires access path
 - `libsolv` integration
+- bundled `libsolv` crate integration with rpm-md loader support
 - solved package set output
 
 Exit criteria:
@@ -592,6 +625,7 @@ Deliverables:
 Exit criteria:
 
 - same build environment contents as old GBS within accepted tolerance
+- isolated execution can bootstrap the minimal host rpm runtime into the prepared root when the root does not yet contain its own `rpmbuild` stack, while still preferring a self-contained root when available
 
 ### Phase 4: source staging and `rpmbuild` runner
 

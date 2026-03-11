@@ -1,0 +1,12 @@
+[package]
+name = "rgbs-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+clap.workspace = true
+rgbs-builder = { path = "../rgbs-builder" }
+rgbs-common = { path = "../rgbs-common" }
+rgbs-config = { path = "../rgbs-config" }
+serde_json.workspace = true

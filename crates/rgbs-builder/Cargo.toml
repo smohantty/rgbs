@@ -1,0 +1,21 @@
+[package]
+name = "rgbs-builder"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+base64.workspace = true
+rgbs-common = { path = "../rgbs-common" }
+rgbs-config = { path = "../rgbs-config" }
+rgbs-repo = { path = "../rgbs-repo" }
+rgbs-resolver = { path = "../rgbs-resolver" }
+rgbs-spec = { path = "../rgbs-spec" }
+serde.workspace = true
+serde_json.workspace = true
+ureq.workspace = true
+url.workspace = true
+walkdir.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

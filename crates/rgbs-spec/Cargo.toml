@@ -1,0 +1,12 @@
+[package]
+name = "rgbs-spec"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+rgbs-common = { path = "../rgbs-common" }
+serde.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

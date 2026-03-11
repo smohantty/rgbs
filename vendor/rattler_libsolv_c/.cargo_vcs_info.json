@@ -1,0 +1,6 @@
+{
+  "git": {
+    "sha1": "5e19ffc74d11e1861e278de9b21ebf783f0bb2b5"
+  },
+  "path_in_vcs": "crates/rattler_libsolv_c"
+}

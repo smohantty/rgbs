@@ -1,0 +1,18 @@
+
+- implement package priority (for things like Debian's pin feature)
+
+- merge SUSETAGS_FILE_* and  REPOSITORY_REPOMD_* keys into REPOSITORY_RESOURCE
+
+- re-order key ids
+
+- deal with DIRSTR entries having dirid 0 (for source rpms)
+
+- write more manpages
+
+- forcebest pruning is not optimal: it should keep multiple packages
+  with the same version instead of reducing to just one package for
+  each name
+
+IDEAS:
+
+drop SEARCH_FILES and add SEARCH_BASENAME instead?

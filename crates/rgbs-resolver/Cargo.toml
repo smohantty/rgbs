@@ -1,0 +1,19 @@
+[package]
+name = "rgbs-resolver"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+libc.workspace = true
+rattler_libsolv_c.workspace = true
+rgbs-common = { path = "../rgbs-common" }
+rgbs-repo = { path = "../rgbs-repo" }
+rgbs-spec = { path = "../rgbs-spec" }
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+flate2.workspace = true
+rgbs-config = { path = "../rgbs-config" }
+tempfile.workspace = true
