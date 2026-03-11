@@ -62,21 +62,10 @@ Install the current CLI crate:
 cargo install --path crates/rgbs-cli
 ```
 
-Important:
-
-- the installed binary name is currently `rgbs-cli`
-- the long-term command model is `rgbs build`, but the binary has not yet been renamed
-
 After install, the command is:
 
 ```bash
-rgbs-cli build --help
-```
-
-If you want the shorter command locally, use a shell alias:
-
-```bash
-alias rgbs=rgbs-cli
+rgbs build --help
 ```
 
 ## Usage
@@ -84,20 +73,20 @@ alias rgbs=rgbs-cli
 Current command shape:
 
 ```bash
-rgbs-cli build [OPTIONS] --arch <ARCH> [GITDIR]
+rgbs build [OPTIONS] --arch <ARCH> [GITDIR]
 ```
 
 Common examples:
 
 ```bash
-rgbs-cli build -A aarch64
-rgbs-cli build -A aarch64 path/to/package
-rgbs-cli build -A aarch64 -P profile.myprofile
-rgbs-cli build -A aarch64 -R https://example.com/repo
-rgbs-cli build -A aarch64 --include-all
-rgbs-cli build -A aarch64 --keep-packs
-rgbs-cli build -A aarch64 --noinit
-rgbs-cli build -A aarch64 --perf
+rgbs build -A aarch64
+rgbs build -A aarch64 path/to/package
+rgbs build -A aarch64 -P profile.myprofile
+rgbs build -A aarch64 -R https://example.com/repo
+rgbs build -A aarch64 --include-all
+rgbs build -A aarch64 --keep-packs
+rgbs build -A aarch64 --noinit
+rgbs build -A aarch64 --perf
 ```
 
 Supported flags on the current CLI:
@@ -147,3 +136,4 @@ The build command prints JSON describing the completed build. When `--perf` is e
 - `--keep-packs` is intended for building multiple packages against a shared prepared root
 - `bwrap` is preferred when available, but the implementation still falls back to host `rpmbuild` when the prepared root is not self-contained enough
 - exact old-GBS `--incremental` behavior is intentionally deferred past v1
+- the CLI crate is still named `rgbs-cli`, but the released binary is now `rgbs`

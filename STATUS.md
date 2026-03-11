@@ -101,8 +101,8 @@ Compatibility target:
 
 ## Known Notes
 
-- the installed binary name is currently `rgbs-cli`
-- docs and plan use `rgbs build` as the intended command model, but the actual Cargo-installed binary has not been renamed yet
+- the CLI crate/package is still named `rgbs-cli`
+- the released binary name is `rgbs`
 - `bwrap` is preferred for isolation, but host `rpmbuild` remains the fallback when the prepared root is not runnable enough
 
 ## Verification Baseline
