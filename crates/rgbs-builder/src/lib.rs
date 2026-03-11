@@ -994,22 +994,60 @@ fn extract_package_payload(root: &Path, package: &DownloadedPackage) -> Result<(
         "staging rpm archive conversion in {}",
         package_extract_dir.display()
     ));
+    let archive_path = package_extract_dir.join("payload.tgz");
+    let archive_file =
+        fs::File::create(&archive_path).map_err(|err| RgbsError::io(&archive_path, err))?;
 
     let mut rpm2archive = Command::new("rpm2archive");
     rpm2archive
         .current_dir(&package_extract_dir)
         .arg(&package.path)
+        .stdout(Stdio::from(archive_file))
         .stderr(Stdio::piped());
-    run_command(&mut rpm2archive).map(|_| ()).map_err(|err| {
-        RgbsError::message(format!(
-            "failed to convert {} into a tar archive in {}: {}",
-            package.path,
-            package_extract_dir.display(),
-            err
-        ))
-    })?;
-
-    let archive_path = locate_rpm_archive_output(&package_extract_dir)?;
+    let rendered_rpm2archive = format!(
+        "(cd {} && {} > {})",
+        package_extract_dir.display(),
+        render_command(&rpm2archive),
+        archive_path.display()
+    );
+    log_debug_line(format!("run: {rendered_rpm2archive}"));
+    let rpm2archive_output = rpm2archive
+        .output()
+        .map_err(|err| RgbsError::command(&rendered_rpm2archive, err.to_string()))?;
+    log_debug_line(format!(
+        "exit: {rendered_rpm2archive} -> {}",
+        rpm2archive_output.status
+    ));
+    let rpm2archive_stdout_text = String::from_utf8_lossy(&rpm2archive_output.stdout);
+    let rpm2archive_stderr_text = String::from_utf8_lossy(&rpm2archive_output.stderr);
+    if !rpm2archive_stdout_text.trim().is_empty() {
+        log_debug_line(format!(
+            "stdout for `{rendered_rpm2archive}`:\n{}",
+            rpm2archive_stdout_text.trim_end()
+        ));
+    }
+    if !rpm2archive_stderr_text.trim().is_empty() {
+        log_debug_line(format!(
+            "stderr for `{rendered_rpm2archive}`:\n{}",
+            rpm2archive_stderr_text.trim_end()
+        ));
+    }
+    if !rpm2archive_output.status.success() {
+        return Err(RgbsError::command(
+            rendered_rpm2archive,
+            if rpm2archive_stderr_text.trim().is_empty() {
+                format!("exit status {}", rpm2archive_output.status)
+            } else {
+                rpm2archive_stderr_text.trim().to_string()
+            },
+        ));
+    }
+    if !archive_path.is_file() {
+        return Err(RgbsError::message(format!(
+            "rpm2archive did not produce {}",
+            archive_path.display()
+        )));
+    }
     log_debug_line(format!(
         "converted {} into archive {}",
         package.path,
@@ -1061,38 +1099,6 @@ fn extract_package_payload(root: &Path, package: &DownloadedPackage) -> Result<(
         .map_err(|err| RgbsError::io(&package_extract_dir, err))?;
 
     Ok(())
-}
-
-fn locate_rpm_archive_output(directory: &Path) -> Result<PathBuf> {
-    let mut entries = Vec::new();
-    for entry in fs::read_dir(directory).map_err(|err| RgbsError::io(directory, err))? {
-        let path = entry.map_err(|err| RgbsError::io(directory, err))?.path();
-        if path.is_file()
-            && matches!(
-                path.extension().and_then(|value| value.to_str()),
-                Some("tar" | "tgz")
-            )
-        {
-            entries.push(path);
-        }
-    }
-    entries.sort();
-    match entries.len() {
-        1 => Ok(entries.remove(0)),
-        0 => Err(RgbsError::message(format!(
-            "rpm2archive did not create an archive under {}",
-            directory.display()
-        ))),
-        _ => Err(RgbsError::message(format!(
-            "rpm2archive created multiple archives under {}: {}",
-            directory.display(),
-            entries
-                .iter()
-                .map(|path| path.display().to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ))),
-    }
 }
 
 fn query_installed_nevras(root: &Path) -> Result<HashSet<String>> {
@@ -2311,16 +2317,6 @@ mod tests {
         assert_eq!(summary.strategy, "shared_keep_packs");
         assert_eq!(summary.package_fingerprint, "pkgfp");
         assert_eq!(summary.installed_packages, 1);
-    }
-
-    #[test]
-    fn finds_single_rpm_archive_output() {
-        let fixture = TempDir::new().unwrap();
-        let archive = fixture.path().join("filesystem-3.1-4.1.armv7l.rpm.tgz");
-        fs::write(&archive, b"test").unwrap();
-
-        let located = locate_rpm_archive_output(fixture.path()).unwrap();
-        assert_eq!(located, archive);
     }
 
     fn sample_plan(repo: &Path, include_all: bool) -> ResolvedBuildPlan {
