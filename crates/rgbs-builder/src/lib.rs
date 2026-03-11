@@ -2,6 +2,8 @@ use std::collections::HashSet;
 use std::env;
 use std::fs;
 use std::io::{Read, Write};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -934,6 +936,7 @@ fn install_packages_into_buildroot(root: &Path, packages: &[DownloadedPackage]) 
     }
 
     register_packages_in_rpmdb(root, packages)?;
+    relax_buildroot_directory_permissions(root)?;
     for package in packages {
         extract_package_payload(root, package).map_err(|err| {
             RgbsError::message(format!(
@@ -1094,10 +1097,44 @@ fn extract_package_payload(root: &Path, package: &DownloadedPackage) -> Result<(
             },
         ));
     }
+    relax_buildroot_directory_permissions(root)?;
 
     fs::remove_dir_all(&package_extract_dir)
         .map_err(|err| RgbsError::io(&package_extract_dir, err))?;
 
+    Ok(())
+}
+
+#[cfg(unix)]
+fn relax_buildroot_directory_permissions(root: &Path) -> Result<()> {
+    let mut adjusted = 0usize;
+    for entry in WalkDir::new(root) {
+        let entry = entry.map_err(|err| RgbsError::message(err.to_string()))?;
+        if !entry.file_type().is_dir() {
+            continue;
+        }
+        let path = entry.path();
+        let metadata = fs::metadata(path).map_err(|err| RgbsError::io(path, err))?;
+        let mode = metadata.permissions().mode();
+        if mode & 0o200 != 0 {
+            continue;
+        }
+        let mut permissions = metadata.permissions();
+        permissions.set_mode(mode | 0o200);
+        fs::set_permissions(path, permissions).map_err(|err| RgbsError::io(path, err))?;
+        adjusted += 1;
+    }
+    if adjusted > 0 {
+        log_debug_line(format!(
+            "relaxed owner-write permission on {adjusted} buildroot directories under {}",
+            root.display()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn relax_buildroot_directory_permissions(_root: &Path) -> Result<()> {
     Ok(())
 }
 
@@ -2317,6 +2354,69 @@ mod tests {
         assert_eq!(summary.strategy, "shared_keep_packs");
         assert_eq!(summary.package_fingerprint, "pkgfp");
         assert_eq!(summary.installed_packages, 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn relaxes_directory_permissions_between_payload_extractions() {
+        let fixture = TempDir::new().unwrap();
+        let root = fixture.path().join("root");
+        let src1 = fixture.path().join("src1");
+        let src2 = fixture.path().join("src2");
+        fs::create_dir_all(src1.join("usr/bin")).unwrap();
+        fs::create_dir_all(src2.join("usr/bin")).unwrap();
+        fs::create_dir_all(&root).unwrap();
+        fs::set_permissions(src1.join("usr/bin"), fs::Permissions::from_mode(0o555)).unwrap();
+        fs::write(src2.join("usr/bin/find"), "payload\n").unwrap();
+
+        let tar1 = fixture.path().join("one.tgz");
+        let tar2 = fixture.path().join("two.tgz");
+        run(Command::new("tar")
+            .arg("-C")
+            .arg(&src1)
+            .arg("-czf")
+            .arg(&tar1)
+            .arg("."));
+        run(Command::new("tar")
+            .arg("-C")
+            .arg(&src2)
+            .arg("-czf")
+            .arg(&tar2)
+            .arg("."));
+
+        run(Command::new("tar")
+            .arg("-xf")
+            .arg(&tar1)
+            .arg("-C")
+            .arg(&root)
+            .arg("--delay-directory-restore")
+            .arg("--no-same-owner"));
+
+        let before = fs::metadata(root.join("usr/bin"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(before & 0o777, 0o555);
+
+        relax_buildroot_directory_permissions(&root).unwrap();
+
+        run(Command::new("tar")
+            .arg("-xf")
+            .arg(&tar2)
+            .arg("-C")
+            .arg(&root)
+            .arg("--delay-directory-restore")
+            .arg("--no-same-owner"));
+
+        let after = fs::metadata(root.join("usr/bin"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_ne!(after & 0o200, 0);
+        assert_eq!(
+            fs::read_to_string(root.join("usr/bin/find")).unwrap(),
+            "payload\n"
+        );
     }
 
     fn sample_plan(repo: &Path, include_all: bool) -> ResolvedBuildPlan {
