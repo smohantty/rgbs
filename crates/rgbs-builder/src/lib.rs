@@ -998,6 +998,7 @@ fn extract_package_payload(root: &Path, package: &DownloadedPackage) -> Result<(
         package_extract_dir.display()
     ));
     let archive_path = package_extract_dir.join("payload.tgz");
+    let payload_root = package_extract_dir.join("payload");
     let archive_file =
         fs::File::create(&archive_path).map_err(|err| RgbsError::io(&archive_path, err))?;
 
@@ -1056,12 +1057,13 @@ fn extract_package_payload(root: &Path, package: &DownloadedPackage) -> Result<(
         package.path,
         archive_path.display()
     ));
+    ensure_dir(&payload_root)?;
 
     let mut tar = Command::new("tar");
     tar.arg("-xf")
         .arg(&archive_path)
         .arg("-C")
-        .arg(root)
+        .arg(&payload_root)
         .arg("--delay-directory-restore")
         .arg("--no-same-owner")
         .stdout(Stdio::piped())
@@ -1097,11 +1099,102 @@ fn extract_package_payload(root: &Path, package: &DownloadedPackage) -> Result<(
             },
         ));
     }
+    merge_payload_tree(&payload_root, root)?;
     relax_buildroot_directory_permissions(root)?;
 
     fs::remove_dir_all(&package_extract_dir)
         .map_err(|err| RgbsError::io(&package_extract_dir, err))?;
 
+    Ok(())
+}
+
+fn merge_payload_tree(staging_root: &Path, root: &Path) -> Result<()> {
+    for entry in fs::read_dir(staging_root).map_err(|err| RgbsError::io(staging_root, err))? {
+        let entry = entry.map_err(|err| RgbsError::io(staging_root, err))?;
+        merge_payload_entry(&entry.path(), &root.join(entry.file_name()))?;
+    }
+    Ok(())
+}
+
+fn merge_payload_entry(src: &Path, dst: &Path) -> Result<()> {
+    let src_metadata = fs::symlink_metadata(src).map_err(|err| RgbsError::io(src, err))?;
+    if src_metadata.is_dir() {
+        merge_payload_directory(src, dst, &src_metadata)
+    } else {
+        replace_payload_leaf(src, dst)
+    }
+}
+
+fn merge_payload_directory(src: &Path, dst: &Path, src_metadata: &fs::Metadata) -> Result<()> {
+    match fs::symlink_metadata(dst) {
+        Ok(dst_metadata) => {
+            if dst_metadata.is_dir() {
+                for entry in fs::read_dir(src).map_err(|err| RgbsError::io(src, err))? {
+                    let entry = entry.map_err(|err| RgbsError::io(src, err))?;
+                    merge_payload_entry(&entry.path(), &dst.join(entry.file_name()))?;
+                }
+                fs::set_permissions(dst, src_metadata.permissions())
+                    .map_err(|err| RgbsError::io(dst, err))?;
+                fs::remove_dir_all(src).map_err(|err| RgbsError::io(src, err))?;
+                Ok(())
+            } else if dst_metadata.file_type().is_symlink() {
+                match fs::metadata(dst) {
+                    Ok(target_metadata) if target_metadata.is_dir() => {
+                        log_debug_line(format!(
+                            "merging staged directory {} into symlinked buildroot directory {}",
+                            src.display(),
+                            dst.display()
+                        ));
+                        for entry in fs::read_dir(src).map_err(|err| RgbsError::io(src, err))? {
+                            let entry = entry.map_err(|err| RgbsError::io(src, err))?;
+                            merge_payload_entry(&entry.path(), &dst.join(entry.file_name()))?;
+                        }
+                        fs::remove_dir_all(src).map_err(|err| RgbsError::io(src, err))?;
+                        Ok(())
+                    }
+                    _ => {
+                        remove_existing_payload_path(dst)?;
+                        ensure_parent_dir(dst)?;
+                        fs::rename(src, dst).map_err(|err| RgbsError::io(dst, err))
+                    }
+                }
+            } else {
+                remove_existing_payload_path(dst)?;
+                ensure_parent_dir(dst)?;
+                fs::rename(src, dst).map_err(|err| RgbsError::io(dst, err))
+            }
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            ensure_parent_dir(dst)?;
+            fs::rename(src, dst).map_err(|err| RgbsError::io(dst, err))
+        }
+        Err(err) => Err(RgbsError::io(dst, err)),
+    }
+}
+
+fn replace_payload_leaf(src: &Path, dst: &Path) -> Result<()> {
+    if dst.exists() || fs::symlink_metadata(dst).is_ok() {
+        remove_existing_payload_path(dst)?;
+    }
+    ensure_parent_dir(dst)?;
+    fs::rename(src, dst).map_err(|err| RgbsError::io(dst, err))
+}
+
+fn remove_existing_payload_path(path: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(path).map_err(|err| RgbsError::io(path, err))?;
+    if metadata.is_dir() && !metadata.file_type().is_symlink() {
+        fs::remove_dir_all(path).map_err(|err| RgbsError::io(path, err))
+    } else {
+        fs::remove_file(path).map_err(|err| RgbsError::io(path, err))
+    }
+}
+
+fn ensure_parent_dir(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        if !parent.exists() {
+            ensure_dir(parent)?;
+        }
+    }
     Ok(())
 }
 
@@ -2238,6 +2331,8 @@ fn collect_paths(root: &Path, extension: &str) -> Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::fs::{PermissionsExt, symlink};
     use std::path::Path;
     use std::process::Command;
 
@@ -2417,6 +2512,33 @@ mod tests {
             fs::read_to_string(root.join("usr/bin/find")).unwrap(),
             "payload\n"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn merges_staged_directories_into_symlinked_buildroot_paths() {
+        let fixture = TempDir::new().unwrap();
+        let root = fixture.path().join("root");
+        let staging = fixture.path().join("staging");
+        fs::create_dir_all(root.join("usr/lib")).unwrap();
+        fs::create_dir_all(root.join("lib/firmware/existing")).unwrap();
+        fs::create_dir_all(staging.join("usr/lib/firmware/updates")).unwrap();
+        symlink("../../lib/firmware", root.join("usr/lib/firmware")).unwrap();
+        fs::write(staging.join("usr/lib/firmware/updates/marker"), "merged\n").unwrap();
+
+        merge_payload_tree(&staging, &root).unwrap();
+
+        assert!(
+            fs::symlink_metadata(root.join("usr/lib/firmware"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("lib/firmware/updates/marker")).unwrap(),
+            "merged\n"
+        );
+        assert!(root.join("lib/firmware/existing").is_dir());
     }
 
     fn sample_plan(repo: &Path, include_all: bool) -> ResolvedBuildPlan {
