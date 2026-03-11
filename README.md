@@ -5,6 +5,7 @@ Rust reimplementation of the old GBS local build path.
 Current scope:
 
 - local package builds only
+- target architectures limited to `armv7l` and `aarch64`
 - `.gbs.conf` compatibility for local build use cases
 - rpm-md repository resolution and `build.conf` handling
 - `libsolv`-based build dependency resolution
@@ -82,7 +83,9 @@ Common examples:
 
 ```bash
 rgbs doctor
+rgbs doctor -A armv7l
 rgbs doctor -A aarch64
+rgbs build -A armv7l
 rgbs build -A aarch64
 rgbs build -A aarch64 path/to/package
 rgbs build -A aarch64 -P profile.myprofile
@@ -112,6 +115,11 @@ Supported flags on the current CLI:
 - `--skip-srcrpm`
 - `--perf` with `--time` as an alias
 
+Supported target architectures:
+
+- `armv7l`
+- `aarch64`
+
 ## Build Flow
 
 `rgbs` currently runs this pipeline:
@@ -137,11 +145,13 @@ What it checks today:
 - source-build prerequisites for building `rgbs` itself from source
 - common native host toolchain commands
 - common cross-compiler names when you pass `-A`
+- target arch validation limited to `armv7l` and `aarch64`
 
 Examples:
 
 ```bash
 rgbs doctor
+rgbs doctor -A armv7l
 rgbs doctor -A aarch64
 ```
 

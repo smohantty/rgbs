@@ -172,6 +172,12 @@ Priority flags to preserve in v1:
 - `--fail-fast`
 - `--clean-repos`
 
+V1 target scope:
+
+- support only `armv7l` and `aarch64` as first-class build targets
+- reject other target arches instead of carrying a wider compatibility matrix through the resolver, buildroot, and toolchain paths
+- prefer explicit scope over partial support claims for x86 or other RPM arches
+
 ## Core Technical Decisions
 
 ### 1. Replace `depanneur`

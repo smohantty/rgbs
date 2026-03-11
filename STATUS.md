@@ -10,6 +10,7 @@ Compatibility target:
 
 - old GBS local build behavior and artifacts
 - not old GBS internal process layout
+- v1 target architectures limited to `armv7l` and `aarch64`
 
 ## Implemented
 
@@ -43,12 +44,13 @@ Compatibility target:
   - `--clean-repos`
   - `--skip-srcrpm`
   - `--perf` / `--time`
+  - canonical target arch validation for `armv7l` and `aarch64`
 - `rgbs doctor` host prerequisite checks for:
   - required runtime tools
   - recommended extras
   - source-build prerequisites
   - common host toolchain commands
-  - optional cross-toolchain hints for a requested arch
+  - optional cross-toolchain hints for `armv7l` and `aarch64`
 - repository metadata handling with:
   - rpm-md `repodata` support
   - legacy `builddata/build.xml` compatibility

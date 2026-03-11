@@ -4,7 +4,10 @@ use std::process::Command;
 
 use clap::{ArgAction, Parser, Subcommand};
 use rgbs_builder::execute_build;
-use rgbs_common::{Result, RgbsError, path_to_string};
+use rgbs_common::{
+    Result, RgbsError, canonicalize_target_arch, normalize_arch, path_to_string,
+    supported_target_arch_list,
+};
 use rgbs_config::{BuildRequest, LoadOptions, load};
 
 #[derive(Debug, Parser)]
@@ -24,7 +27,12 @@ enum Commands {
 #[derive(Debug, clap::Args)]
 struct BuildArgs {
     gitdir: Option<PathBuf>,
-    #[arg(short = 'A', long = "arch")]
+    #[arg(
+        short = 'A',
+        long = "arch",
+        value_parser = parse_target_arch_arg,
+        help = "target arch: armv7l or aarch64"
+    )]
     arch: String,
     #[arg(short = 'P', long = "profile")]
     profile: Option<String>,
@@ -60,7 +68,12 @@ struct BuildArgs {
 
 #[derive(Debug, clap::Args)]
 struct DoctorArgs {
-    #[arg(short = 'A', long = "arch")]
+    #[arg(
+        short = 'A',
+        long = "arch",
+        value_parser = parse_target_arch_arg,
+        help = "target arch: armv7l or aarch64"
+    )]
     arch: Option<String>,
 }
 
@@ -511,38 +524,39 @@ fn same_arch(target_arch: &str, host_arch: &str) -> bool {
     normalize_arch(target_arch) == normalize_arch(host_arch)
 }
 
-fn normalize_arch(arch: &str) -> &str {
-    match arch {
-        "amd64" => "x86_64",
-        "i386" | "i486" | "i586" | "i686" => "x86",
-        other => other,
-    }
+fn parse_target_arch_arg(value: &str) -> std::result::Result<String, String> {
+    canonicalize_target_arch(value)
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| {
+            format!(
+                "unsupported target arch `{value}`; supported targets: {}",
+                supported_target_arch_list()
+            )
+        })
 }
 
 fn cross_compiler_candidates(arch: &str) -> Vec<&'static str> {
-    match arch {
-        "aarch64" => vec![
+    match canonicalize_target_arch(arch) {
+        Some("aarch64") => vec![
             "aarch64-linux-gnu-gcc",
             "aarch64-none-linux-gnu-gcc",
             "aarch64-linux-gcc",
         ],
-        "armv7l" | "armhf" | "arm" => vec![
+        Some("armv7l") => vec![
             "arm-linux-gnueabihf-gcc",
             "armv7hl-linux-gnueabi-gcc",
             "arm-linux-gnu-gcc",
         ],
-        "i586" | "i686" => vec!["i686-linux-gnu-gcc", "i586-linux-gnu-gcc"],
-        "x86_64" => vec!["x86_64-linux-gnu-gcc"],
         _ => Vec::new(),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{cross_compiler_candidates, same_arch};
+    use super::{cross_compiler_candidates, parse_target_arch_arg, same_arch};
 
     #[test]
-    fn cross_compiler_candidates_cover_common_arches() {
+    fn cross_compiler_candidates_cover_supported_arches() {
         assert!(
             cross_compiler_candidates("aarch64")
                 .iter()
@@ -553,6 +567,14 @@ mod tests {
                 .iter()
                 .any(|candidate| *candidate == "arm-linux-gnueabihf-gcc")
         );
+        assert!(cross_compiler_candidates("x86_64").is_empty());
+    }
+
+    #[test]
+    fn target_arch_parser_canonicalizes_supported_aliases() {
+        assert_eq!(parse_target_arch_arg("arm64").unwrap(), "aarch64");
+        assert_eq!(parse_target_arch_arg("armhf").unwrap(), "armv7l");
+        assert!(parse_target_arch_arg("x86_64").is_err());
     }
 
     #[test]

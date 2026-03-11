@@ -7,7 +7,10 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use bzip2::read::BzDecoder;
 use indexmap::{IndexMap, IndexSet};
-use rgbs_common::{Result, RgbsError, expand_tilde, path_to_string};
+use rgbs_common::{
+    Result, RgbsError, canonicalize_target_arch, expand_tilde, path_to_string,
+    supported_target_arch_list,
+};
 use serde::Serialize;
 use url::Url;
 
@@ -223,6 +226,13 @@ impl Config {
                 "--noinit cannot be specified together with --clean",
             ));
         }
+        let arch = canonicalize_target_arch(&request.arch).ok_or_else(|| {
+            RgbsError::config(format!(
+                "unsupported target arch `{}`; supported targets: {}",
+                request.arch,
+                supported_target_arch_list()
+            ))
+        })?;
 
         let profile = self.resolve_profile(request.profile.as_deref())?;
         let buildroot_value = request
@@ -259,7 +269,7 @@ impl Config {
                 .map(|path| path_to_string(path))
                 .collect(),
             git_dir: path_to_string(&request.git_dir),
-            arch: request.arch.clone(),
+            arch: arch.to_string(),
             profile,
             buildroot,
             packaging_dir,
@@ -1187,6 +1197,91 @@ url = https://repo/demo
             .to_string();
         assert!(err.contains("--noinit"));
         assert!(err.contains("--clean"));
+    }
+
+    #[test]
+    fn canonicalizes_supported_target_arch_aliases() {
+        let fixture = r#"
+[general]
+profile = profile.demo
+
+[profile.demo]
+repos = repo.demo
+
+[repo.demo]
+url = https://repo/demo
+"#;
+        let harness = TestHarness::new();
+        harness.write_home(fixture);
+
+        let config = load(&harness.options()).unwrap();
+        let plan = config
+            .resolve_build_plan(&BuildRequest {
+                git_dir: harness.cwd.clone(),
+                arch: "armhf".to_string(),
+                profile: None,
+                repositories: Vec::new(),
+                dist: None,
+                buildroot: None,
+                defines: Vec::new(),
+                spec: None,
+                include_all: false,
+                noinit: false,
+                clean: false,
+                keep_packs: false,
+                overwrite: false,
+                fail_fast: false,
+                clean_repos: false,
+                skip_srcrpm: false,
+                perf: false,
+            })
+            .unwrap();
+
+        assert_eq!(plan.arch, "armv7l");
+    }
+
+    #[test]
+    fn rejects_unsupported_target_arches() {
+        let fixture = r#"
+[general]
+profile = profile.demo
+
+[profile.demo]
+repos = repo.demo
+
+[repo.demo]
+url = https://repo/demo
+"#;
+        let harness = TestHarness::new();
+        harness.write_home(fixture);
+
+        let config = load(&harness.options()).unwrap();
+        let err = config
+            .resolve_build_plan(&BuildRequest {
+                git_dir: harness.cwd.clone(),
+                arch: "x86_64".to_string(),
+                profile: None,
+                repositories: Vec::new(),
+                dist: None,
+                buildroot: None,
+                defines: Vec::new(),
+                spec: None,
+                include_all: false,
+                noinit: false,
+                clean: false,
+                keep_packs: false,
+                overwrite: false,
+                fail_fast: false,
+                clean_repos: false,
+                skip_srcrpm: false,
+                perf: false,
+            })
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("unsupported target arch"));
+        assert!(err.contains("armv7l"));
+        assert!(err.contains("aarch64"));
     }
 
     struct TestHarness {

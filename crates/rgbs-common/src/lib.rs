@@ -8,6 +8,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 pub type Result<T> = std::result::Result<T, RgbsError>;
+pub const SUPPORTED_TARGET_ARCHES: [&str; 2] = ["armv7l", "aarch64"];
 
 #[derive(Debug, Error)]
 pub enum RgbsError {
@@ -80,6 +81,28 @@ pub fn cache_root() -> Result<PathBuf> {
         .map(PathBuf::from)
         .ok_or_else(|| RgbsError::config("HOME is not set"))?;
     Ok(home_dir.join(".cache").join("rgbs"))
+}
+
+pub fn canonicalize_target_arch(arch: &str) -> Option<&'static str> {
+    match arch {
+        "aarch64" | "arm64" => Some("aarch64"),
+        "armv7l" | "armv7hl" | "armhf" => Some("armv7l"),
+        _ => None,
+    }
+}
+
+pub fn supported_target_arch_list() -> &'static str {
+    "armv7l, aarch64"
+}
+
+pub fn normalize_arch(arch: &str) -> &str {
+    match arch {
+        "amd64" => "x86_64",
+        "i386" | "i486" | "i586" | "i686" => "x86",
+        "arm64" => "aarch64",
+        "armv7hl" | "armhf" => "armv7l",
+        other => other,
+    }
 }
 
 pub fn sha256_hex(input: impl AsRef<[u8]>) -> String {
@@ -157,4 +180,31 @@ fn shell_escape(value: &str) -> String {
     }
 
     format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{canonicalize_target_arch, normalize_arch, supported_target_arch_list};
+
+    #[test]
+    fn canonicalizes_supported_target_arch_aliases() {
+        assert_eq!(canonicalize_target_arch("aarch64"), Some("aarch64"));
+        assert_eq!(canonicalize_target_arch("arm64"), Some("aarch64"));
+        assert_eq!(canonicalize_target_arch("armv7l"), Some("armv7l"));
+        assert_eq!(canonicalize_target_arch("armhf"), Some("armv7l"));
+        assert_eq!(canonicalize_target_arch("x86_64"), None);
+    }
+
+    #[test]
+    fn normalizes_common_arch_aliases() {
+        assert_eq!(normalize_arch("amd64"), "x86_64");
+        assert_eq!(normalize_arch("i686"), "x86");
+        assert_eq!(normalize_arch("arm64"), "aarch64");
+        assert_eq!(normalize_arch("armhf"), "armv7l");
+    }
+
+    #[test]
+    fn supported_target_arch_list_matches_scope() {
+        assert_eq!(supported_target_arch_list(), "armv7l, aarch64");
+    }
 }
