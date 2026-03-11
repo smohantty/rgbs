@@ -52,6 +52,7 @@ Run the CLI without installing:
 
 ```bash
 cargo run -p rgbs-cli -- build --help
+cargo run -p rgbs-cli -- doctor
 ```
 
 ## Install
@@ -66,6 +67,7 @@ After install, the command is:
 
 ```bash
 rgbs build --help
+rgbs doctor
 ```
 
 ## Usage
@@ -79,6 +81,8 @@ rgbs build [OPTIONS] --arch <ARCH> [GITDIR]
 Common examples:
 
 ```bash
+rgbs doctor
+rgbs doctor -A aarch64
 rgbs build -A aarch64
 rgbs build -A aarch64 path/to/package
 rgbs build -A aarch64 -P profile.myprofile
@@ -121,6 +125,30 @@ Supported flags on the current CLI:
 7. stage sources and spec
 8. run `rpmbuild`
 9. collect RPM/SRPM artifacts into the output repo layout
+
+## Doctor
+
+`rgbs doctor` checks the host environment and recommends missing prerequisites.
+
+What it checks today:
+
+- required runtime tools for `rgbs build`
+- recommended extras like `bwrap` and `createrepo_c`
+- source-build prerequisites for building `rgbs` itself from source
+- common native host toolchain commands
+- common cross-compiler names when you pass `-A`
+
+Examples:
+
+```bash
+rgbs doctor
+rgbs doctor -A aarch64
+```
+
+Scope note:
+
+- `doctor` checks host prerequisites and common toolchain expectations
+- package-specific `BuildRequires` are still resolved from the spec and repos during `rgbs build`
 
 ## Output
 

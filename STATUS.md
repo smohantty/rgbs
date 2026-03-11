@@ -43,6 +43,12 @@ Compatibility target:
   - `--clean-repos`
   - `--skip-srcrpm`
   - `--perf` / `--time`
+- `rgbs doctor` host prerequisite checks for:
+  - required runtime tools
+  - recommended extras
+  - source-build prerequisites
+  - common host toolchain commands
+  - optional cross-toolchain hints for a requested arch
 - repository metadata handling with:
   - rpm-md `repodata` support
   - legacy `builddata/build.xml` compatibility
